@@ -129,7 +129,12 @@ const ToolCall: React.FC<ToolCallProps> = (props) => {
       return props['data-tool-error'];
     }
     if (fetchedData?.data?.result?.error) {
-      return fetchedData.data.result.error;
+      const error = fetchedData.data.result.error;
+      // Handle object errors (e.g., { code, message }) to avoid [object Object]
+      if (typeof error === 'object' && error !== null) {
+        return (error as any).message || (error as any).error || JSON.stringify(error);
+      }
+      return error;
     }
     return null;
   }, [props['data-tool-error'], fetchedData?.data?.result?.error]);
@@ -142,8 +147,12 @@ const ToolCall: React.FC<ToolCallProps> = (props) => {
     if (props['data-tool-result']) {
       rawResult = props['data-tool-result'];
     } else if (fetchedData?.data?.result?.error) {
-      // Fall back to API data - error
-      return fetchedData.data.result.error;
+      // Fall back to API data - error (handle object errors)
+      const error = fetchedData.data.result.error;
+      if (typeof error === 'object' && error !== null) {
+        return (error as any).message || (error as any).error || JSON.stringify(error);
+      }
+      return error;
     } else if (fetchedData?.data?.result?.output) {
       // Fall back to API data - output
       rawResult =
