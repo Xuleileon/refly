@@ -38,6 +38,11 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "image=${OWNER}/refly-${{ matrix.app }}" >> $GITHUB_OUTPUT
 
+      - name: Patch Dockerfile (fix missing packages)
+        if: matrix.app == 'api'
+        run: |
+          sed -i 's/font-noto-extra/fonts-noto-cjk-extra/' ./apps/api/Dockerfile.slim
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
