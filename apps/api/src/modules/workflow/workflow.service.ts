@@ -337,12 +337,17 @@ export class WorkflowService {
       `Workflow execution ${executionId} initialized with ${nodeExecutions.length} nodes`,
     );
 
-    // Trigger a poll job for this execution; subsequent polls will re-schedule themselves as needed
     if (this.pollWorkflowQueue) {
       await this.pollWorkflowQueue.add(
         'pollWorkflow',
         { user, executionId, nodeBehavior },
-        { delay: this.pollIntervalMs, removeOnComplete: true },
+        {
+          delay: this.pollIntervalMs,
+          removeOnComplete: true,
+          removeOnFail: true,
+          attempts: 1,
+          jobId: `poll:${executionId}:init`,
+        },
       );
     }
 
@@ -1048,12 +1053,17 @@ export class WorkflowService {
       // Determine if we should continue polling
       const hasPendingOrExecuting = pendingNodes > 0 || executingNodes > 0;
 
-      // Only reschedule poll if there are still pending/executing nodes AND status is not terminal
       if (hasPendingOrExecuting && newStatus === 'executing' && this.pollWorkflowQueue) {
         await this.pollWorkflowQueue.add(
           'pollWorkflow',
           { user, executionId, nodeBehavior },
-          { delay: this.pollIntervalMs, removeOnComplete: true },
+          {
+            delay: this.pollIntervalMs,
+            removeOnComplete: true,
+            removeOnFail: true,
+            attempts: 1,
+            jobId: `poll:${executionId}:${Date.now()}`,
+          },
         );
       } else {
         this.logger.log(
