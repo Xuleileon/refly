@@ -36,7 +36,8 @@ export class PollWorkflowProcessor extends WorkerHost {
       await this.workflowService.pollWorkflow(job.data);
     } catch (error) {
       this.logger.error(`[${QUEUE_POLL_WORKFLOW}] Error processing job ${job.id}: ${error?.stack}`);
-      throw error;
+      // Swallow the error to prevent BullMQ auto-retry which can cause infinite poll loops.
+      // pollWorkflow handles its own rescheduling logic internally.
     }
   }
 }
