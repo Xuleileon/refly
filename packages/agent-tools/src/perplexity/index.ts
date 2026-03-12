@@ -4,6 +4,30 @@ import { PerplexityClient, ChatCompletionMessage } from './client';
 import { AgentBaseTool, AgentBaseToolset, AgentToolConstructor, ToolCallResult } from '../base';
 import { ToolsetDefinition } from '@refly/openapi-schema';
 
+const hasValidMessageSequence = (messages: Array<{ role?: string }>): boolean => {
+  if (!messages.length) return false;
+  if (messages.some((message) => !message.role)) return false;
+
+  let index = 0;
+  while (index < messages.length && messages[index].role === 'system') {
+    index += 1;
+  }
+
+  if (index >= messages.length) {
+    return false;
+  }
+
+  let expectedRole: 'user' | 'assistant' = 'user';
+  for (let i = index; i < messages.length; i += 1) {
+    if (messages[i].role !== expectedRole) {
+      return false;
+    }
+    expectedRole = expectedRole === 'user' ? 'assistant' : 'user';
+  }
+
+  return messages[messages.length - 1].role === 'user';
+};
+
 export const PerplexityToolsetDefinition: ToolsetDefinition = {
   key: 'perplexity',
   domain: 'https://perplexity.ai',
@@ -12,17 +36,17 @@ export const PerplexityToolsetDefinition: ToolsetDefinition = {
     'zh-CN': 'Perplexity',
   },
   descriptionDict: {
-    en: 'Perplexity is an AI-powered search engine that provides comprehensive answers to questions by searching the web and synthesizing information from multiple sources. It combines real-time web search with advanced reasoning capabilities, including the powerful sonar-deep-research model for exhaustive research across hundreds of sources with expert-level insights and detailed report generation.',
+    en: 'Perplexity is an AI-powered search engine that provides comprehensive answers to questions by searching the web and synthesizing information from multiple sources. It combines real-time web search with advanced reasoning capabilities.',
     'zh-CN':
-      'Perplexity 是一个由 AI 驱动的搜索引擎，通过搜索网络并综合多个来源的信息来提供全面的答案。它将实时网络搜索与高级推理能力相结合，包括强大的 sonar-deep-research 模型，可进行数百个来源的全面研究，提供专家级洞察和详细报告生成。',
+      'Perplexity 是一个由 AI 驱动的搜索引擎，通过搜索网络并综合多个来源的信息来提供全面的答案。它将实时网络搜索与高级推理能力相结合。',
   },
   tools: [
     {
       name: 'chat_completions',
       descriptionDict: {
-        en: 'Generate responses using Perplexity AI models with real-time web search capabilities. Supports various models including sonar, sonar-pro, reasoning models, and sonar-deep-research for exhaustive research across hundreds of sources with expert-level insights and detailed report generation. Now supports web search options and structured JSON output.',
+        en: 'Generate responses using Perplexity AI models with real-time web search capabilities. Supports various models including sonar and sonar-pro. Now supports web search options and structured JSON output.',
         'zh-CN':
-          '使用 Perplexity AI 模型生成响应，具有实时网络搜索功能。支持各种模型，包括 sonar、sonar-pro、推理模型和 sonar-deep-research，可进行数百个来源的全面研究，提供专家级洞察和详细报告生成。现在支持网页搜索选项和结构化 JSON 输出。',
+          '使用 Perplexity AI 模型生成响应，具有实时网络搜索功能。支持各种模型，包括 sonar 和 sonar-pro。现在支持网页搜索选项和结构化 JSON 输出。',
       },
     },
     {
@@ -86,13 +110,7 @@ export class PerplexityChatCompletions extends AgentBaseTool<PerplexityToolParam
   schema = z
     .object({
       model: z
-        .enum([
-          'sonar',
-          'sonar-pro',
-          'sonar-reasoning',
-          'sonar-reasoning-pro',
-          'sonar-deep-research',
-        ])
+        .enum(['sonar', 'sonar-pro'])
         .describe('The model to use for generating responses')
         .default('sonar'),
       messages: z
@@ -158,19 +176,61 @@ export class PerplexityChatCompletions extends AgentBaseTool<PerplexityToolParam
         .optional(),
       response_format: z
         .object({
-          type: z
-            .enum(['text', 'json_schema'])
-            .describe('The format of the response')
-            .default('text'),
+          type: z.string().describe('The format of the response'),
           json_schema: z
             .object({
-              schema: z.record(z.any()).describe('JSON schema for structured output'),
+              schema: z.object({}).passthrough().describe('JSON schema for structured output'),
             })
             .describe('Schema definition for JSON structured output')
             .optional(),
+          regex: z
+            .object({
+              regex: z.string().describe('Regex pattern for structured output'),
+            })
+            .describe('Regex configuration for structured output')
+            .optional(),
         })
         .describe('Format specification for the response')
-        .optional(),
+        .optional()
+        .superRefine((data, ctx) => {
+          if (!data) return;
+          const allowedTypes = ['text', 'json_schema', 'regex'];
+          if (!allowedTypes.includes(data.type)) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `type must be one of ${allowedTypes.join(', ')}`,
+              path: ['type'],
+            });
+          }
+          if (data.type === 'json_schema' && !data.json_schema) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'json_schema is required when type is json_schema.',
+              path: ['json_schema'],
+            });
+          }
+          if (data.type === 'regex' && !data.regex) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'regex is required when type is regex.',
+              path: ['regex'],
+            });
+          }
+          if (data.type !== 'json_schema' && data.json_schema) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'json_schema is only allowed when type is json_schema.',
+              path: ['json_schema'],
+            });
+          }
+          if (data.type !== 'regex' && data.regex) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'regex is only allowed when type is regex.',
+              path: ['regex'],
+            });
+          }
+        }),
     })
     .refine(
       (data) => !(data.presence_penalty !== undefined && data.frequency_penalty !== undefined),
@@ -178,10 +238,20 @@ export class PerplexityChatCompletions extends AgentBaseTool<PerplexityToolParam
         message: 'Cannot set both presence_penalty and frequency_penalty. Choose one or neither.',
         path: ['presence_penalty', 'frequency_penalty'],
       },
-    );
+    )
+    .superRefine((data, ctx) => {
+      if (!hasValidMessageSequence(data.messages)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            'Messages must start with optional system message(s), then alternate user and assistant, and end with a user message.',
+          path: ['messages'],
+        });
+      }
+    });
 
   description =
-    'Generate responses using Perplexity AI models with real-time web search capabilities. Supports various models including sonar, sonar-pro, reasoning models, and sonar-deep-research for exhaustive research across hundreds of sources with expert-level insights and detailed report generation. Note: presence_penalty and frequency_penalty cannot be set simultaneously - choose one or neither.';
+    'Generate responses using Perplexity AI models with real-time web search capabilities. Supports various models including sonar and sonar-pro. Note: presence_penalty and frequency_penalty cannot be set simultaneously - choose one or neither.';
 
   protected params: PerplexityToolParams;
 
@@ -243,10 +313,6 @@ export class PerplexityChatCompletions extends AgentBaseTool<PerplexityToolParam
         summaryParts.push(`with ${response.usage.total_tokens} tokens used`);
       }
 
-      if (input.model === 'sonar-deep-research' && response.usage?.num_search_queries) {
-        summaryParts.push(`(${response.usage.num_search_queries} search queries performed)`);
-      }
-
       // Calculate credit cost based on total_cost * 140, minimum 1, round up decimals
       const creditCost = response.usage?.cost?.total_cost
         ? Math.ceil(Math.max(response.usage.cost.total_cost * 140, 1))
@@ -259,13 +325,14 @@ export class PerplexityChatCompletions extends AgentBaseTool<PerplexityToolParam
         creditCost,
       };
     } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Unknown error occurred while generating chat completion';
       return {
         status: 'error',
-        error: 'Error generating chat completion',
-        summary:
-          error instanceof Error
-            ? error.message
-            : 'Unknown error occurred while generating chat completion',
+        error: message,
+        summary: message,
       };
     }
   }
@@ -274,9 +341,17 @@ export class PerplexityChatCompletions extends AgentBaseTool<PerplexityToolParam
 export class PerplexitySearch extends AgentBaseTool<PerplexityToolParams> {
   name = 'search';
   toolsetKey = PerplexityToolsetDefinition.key;
+  private static readonly maxQueriesPerBatch = 5;
+  private static readonly maxTotalQueries = 50;
 
   schema = z.object({
-    query: z.array(z.string()).describe('An array of search queries to perform').min(1).max(10),
+    query: z
+      .array(z.string())
+      .describe(
+        `An array of search queries to perform (max ${PerplexitySearch.maxTotalQueries}, batched by ${PerplexitySearch.maxQueriesPerBatch})`,
+      )
+      .min(1)
+      .max(PerplexitySearch.maxTotalQueries),
   });
 
   description =
@@ -296,29 +371,39 @@ export class PerplexitySearch extends AgentBaseTool<PerplexityToolParams> {
         baseUrl: this.params.baseUrl,
       });
 
-      const response = await client.search({
-        query: input.query,
-      });
+      const searchResults = [];
+      for (let i = 0; i < input.query.length; i += PerplexitySearch.maxQueriesPerBatch) {
+        const batch = input.query.slice(i, i + PerplexitySearch.maxQueriesPerBatch);
+        const response = await client.search({
+          query: batch,
+        });
+        if (response.results?.length) {
+          searchResults.push(...response.results);
+        }
+      }
 
       const totalResults =
-        response.results?.reduce((sum, result) => sum + (result.results?.length ?? 0), 0) ?? 0;
+        searchResults.reduce((sum, result) => sum + (result.results?.length ?? 0), 0) ?? 0;
+      const totalQueries = input.query.length;
+      const totalBatches = Math.ceil(totalQueries / PerplexitySearch.maxQueriesPerBatch);
 
       return {
         status: 'success',
         data: {
-          searchResults: response.results,
-          totalQueries: input.query.length,
+          searchResults,
+          totalQueries,
           totalResults,
         },
-        summary: `Successfully performed ${input.query.length} search queries and found ${totalResults} results`,
-        creditCost: 1,
+        summary: `Successfully performed ${totalQueries} search queries in ${totalBatches} batches and found ${totalResults} results`,
+        creditCost: totalBatches,
       };
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Unknown error occurred while performing search';
       return {
         status: 'error',
-        error: 'Error performing search',
-        summary:
-          error instanceof Error ? error.message : 'Unknown error occurred while performing search',
+        error: message,
+        summary: message,
       };
     }
   }

@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { VoucherTriggerResult } from '@refly/openapi-schema';
 import { useState, useEffect } from 'react';
 import { logEvent } from '@refly/telemetry-web';
-import { SharePoster } from './share-poster';
+import { X } from 'lucide-react';
 import { useSubscriptionStoreShallow } from '@refly/stores';
 import { Confetti } from './confetti';
 import { TicketBottomCard } from './ticket-bottom-card';
@@ -16,11 +16,8 @@ interface VoucherPopupProps {
   onClose: () => void;
   voucherResult: VoucherTriggerResult | null;
   onUseNow?: () => void;
-  onShare?: () => void;
   /** If true, this voucher was claimed via invite link (not earned by publishing) */
   useOnlyMode?: boolean;
-  /** Name of the person who sent the voucher (for claimed vouchers) */
-  inviterName?: string;
 }
 
 export const VoucherPopup = ({
@@ -28,15 +25,9 @@ export const VoucherPopup = ({
   onClose,
   voucherResult,
   onUseNow: onUseNowProp,
-  onShare: onShareProp,
   useOnlyMode = false,
-  inviterName,
 }: VoucherPopupProps) => {
   const { t, i18n } = useTranslation();
-  const [showSharePoster, setShowSharePoster] = useState(false);
-  const [shareInvitation, setShareInvitation] = useState<any>(null);
-  const [shareUrl, setShareUrl] = useState('');
-  const [creatingInvitation, setCreatingInvitation] = useState(false);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   // Key to force Confetti remount on each popup open
   const [confettiKey, setConfettiKey] = useState(0);
@@ -80,6 +71,17 @@ export const VoucherPopup = ({
     ? Math.ceil((new Date(voucher.expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
     : 7;
 
+  // Calculate min height based on mode, user type and language
+  const isZh = i18n.language?.startsWith('zh');
+  const getMinHeight = () => {
+    if (useOnlyMode) {
+      if (!isPlusUser) return '380px';
+      return isZh ? '380px' : '390px';
+    }
+    if (!isPlusUser) return isZh ? '480px' : '510px';
+    return isZh ? '450px' : '480px';
+  };
+
   // Handle "Use It Now" / "Use Coupon" / "Publish to Get Coupon" / "Claim" button click
   const handleUseNow = async () => {
     // Log click event
@@ -94,13 +96,13 @@ export const VoucherPopup = ({
       return;
     }
 
-    // If Plus user in useOnlyMode (claimed via invite), just close - they can share
-    if (useOnlyMode && isPlusUser) {
+    // If Plus user, just close
+    if (isPlusUser) {
       onClose();
       return;
     }
 
-    // For non-Plus user (both useOnlyMode and normal mode): Create Stripe checkout session with voucher
+    // For non-Plus user: Create Stripe checkout session with voucher
     setIsCheckingOut(true);
     try {
       console.log('[voucher-popup] voucher:', voucher);
@@ -113,24 +115,29 @@ export const VoucherPopup = ({
 
       console.log('[voucher-popup] validateRes:', validateRes.data);
 
+      // Determine if user has a paid subscription
+      const currentPlan = planType || 'free';
+
       const body: {
         planType: 'plus';
         interval: 'monthly';
         voucherId?: string;
+        voucherEntryPoint?: string;
+        voucherUserType?: string;
+        source?: string;
+        currentPlan?: string;
       } = {
         planType: 'plus',
         interval: 'monthly',
+        currentPlan,
+        source: 'voucher',
       };
 
       if (validateRes.data?.data?.valid) {
         body.voucherId = voucher.voucherId;
+        body.voucherEntryPoint = 'discount_popup';
+        body.voucherUserType = userType;
         console.log('[voucher-popup] voucher is valid, adding to checkout body');
-
-        logEvent('voucher_applied', null, {
-          voucher_value: voucherValue,
-          entry_point: useOnlyMode ? 'claimed_popup' : 'discount_popup',
-          user_type: userType,
-        });
       } else {
         console.log('[voucher-popup] voucher is NOT valid:', validateRes.data?.data);
         const reason = validateRes.data?.data?.reason || 'Voucher is no longer valid';
@@ -157,51 +164,6 @@ export const VoucherPopup = ({
       );
     } finally {
       setIsCheckingOut(false);
-    }
-  };
-
-  // Handle "Share With Friend" button click
-  const handleShare = async () => {
-    // Log click event
-    logEvent('voucher_share_click', null, {
-      voucher_value: voucherValue,
-      user_type: userType,
-    });
-
-    // Use custom handler if provided
-    if (onShareProp) {
-      onShareProp();
-      return;
-    }
-
-    // Create invitation
-    setCreatingInvitation(true);
-    try {
-      const response = await getClient().createVoucherInvitation({
-        body: {
-          voucherId: voucher.voucherId,
-        },
-      });
-
-      if (response.data?.data?.invitation) {
-        const invitation = response.data.data.invitation;
-        setShareInvitation(invitation);
-
-        // Build share URL - pointing to homepage with invite parameter
-        const baseUrl = window.location.origin;
-        const url = `${baseUrl}/invite?invite=${invitation.inviteCode}`;
-        setShareUrl(url);
-
-        // Show share poster (don't close voucher popup yet - it will be closed when SharePoster closes)
-        setShowSharePoster(true);
-      } else {
-        message.error(t('voucher.share.createFailed', 'Failed to create invitation'));
-      }
-    } catch (error) {
-      console.error('Failed to create invitation:', error);
-      message.error(t('voucher.share.createFailed', 'Failed to create invitation'));
-    } finally {
-      setCreatingInvitation(false);
     }
   };
 
@@ -245,17 +207,7 @@ export const VoucherPopup = ({
           />
 
           {/* Content Container - height varies by mode and language */}
-          <div
-            className="relative"
-            style={{
-              minHeight:
-                useOnlyMode && !isPlusUser
-                  ? '420px'
-                  : i18n.language?.startsWith('zh')
-                    ? '500px'
-                    : '540px',
-            }}
-          >
+          <div className="relative" style={{ minHeight: getMinHeight() }}>
             {/* Top Section - Congratulations and Coupon with green gradient background */}
             {/* 16px margin from left, right, top and bottom, with rounded corners on all sides */}
             <div
@@ -265,6 +217,16 @@ export const VoucherPopup = ({
                 border: '0.5px solid rgba(9, 9, 9, 0.07)',
               }}
             >
+              {/* Close button */}
+              <button
+                type="button"
+                onClick={onClose}
+                className="absolute top-3 right-3 flex items-center justify-center w-6 h-6 bg-transparent text-emerald-700/50 hover:text-emerald-700 transition-colors duration-150 outline-none focus:outline-none border-none"
+                aria-label={t('common.close', 'Close')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+
               {/* Header - Congratulations */}
               <div className="flex items-center justify-center gap-3">
                 <span
@@ -292,7 +254,9 @@ export const VoucherPopup = ({
                       backgroundClip: 'text',
                     }}
                   >
-                    {discountPercent}% OFF
+                    {i18n.language?.startsWith('zh')
+                      ? `会员 ${voucherValue}折`
+                      : `${discountPercent}% OFF`}
                   </span>
                   <span className="text-xl text-black/80">
                     {t('voucher.popup.coupon', 'Coupon')}
@@ -310,58 +274,34 @@ export const VoucherPopup = ({
             <TicketBottomCard>
               {/* Description text - different based on user status and mode */}
               <div
-                className="text-center text-sm leading-relaxed px-2"
+                className="text-center text-sm leading-relaxed"
                 style={{ color: 'rgba(28, 31, 35, 0.6)' }}
               >
-                {useOnlyMode && isPlusUser ? (
-                  // Plus user who claimed via invite: encourage sharing
+                {isPlusUser ? (
+                  // Plus user: show congratulations description
                   <p>
                     {t(
-                      'voucher.popup.plusUserClaimedDesc',
-                      "You're already a Plus member.\nGift this voucher to a friend!",
+                      'voucher.popup.plusUserDesc1',
+                      "To celebrate your amazing work, we're giving you a {{discountPercent}}% off coupon.",
+                      { discountPercent, voucherValue },
                     )}
                   </p>
                 ) : useOnlyMode ? (
-                  // Non-Plus user who claimed via invite: show sender name
+                  // Non-Plus user who claimed via invite: show upgrade description
                   <p>
-                    {t('voucher.popup.claimedDesc', '{{name}} sent you a coupon — go claim it!', {
-                      name: inviterName || 'A friend',
-                    })}
+                    {t(
+                      'voucher.popup.claimedDesc',
+                      'Upgrade to Refly.ai Plus and unlock advanced models like Gemini 3.',
+                    )}
                   </p>
-                ) : isPlusUser ? (
-                  // Plus user who earned voucher: show invite description
-                  <>
-                    <p>
-                      {t(
-                        'voucher.popup.plusUserDesc1',
-                        "To celebrate your amazing work, we're giving you a ${{value}} discount.",
-                        { value: discountValue },
-                      )}
-                    </p>
-                    <p className="mt-2">
-                      {t(
-                        'voucher.popup.plusUserDesc2',
-                        "Invite a friend to register with your link and purchase a membership, and you'll both get rewards:",
-                      )}
-                    </p>
-                    <ul className="mt-1 text-left pl-4 list-disc">
-                      <li>{t('voucher.popup.plusUserReward1', 'You: +2,000 bonus credits')}</li>
-                      <li>
-                        {t(
-                          'voucher.popup.plusUserReward2',
-                          'Your friend: A special discount for their membership purchase.',
-                        )}
-                      </li>
-                    </ul>
-                  </>
                 ) : (
                   // Non-Plus user who earned voucher: show discount and price description
                   <>
                     <p>
                       {t(
                         'voucher.popup.nonPlusUserDesc1',
-                        "To celebrate your amazing work, we're giving you a ${{value}} discount—our way of saying thanks for contributing such a high-quality template to the Marketplace.",
-                        { value: discountValue },
+                        "To celebrate your amazing work, we're giving you a {{discountPercent}}% off coupon - our way of saying thanks for contributing such a high-quality template.",
+                        { discountPercent, voucherValue },
                       )}
                     </p>
                     <p className="mt-1">
@@ -377,8 +317,8 @@ export const VoucherPopup = ({
 
               {/* Button group */}
               <div className="mt-5 flex flex-col gap-3 max-w-[320px]">
-                {/* Use/Claim button: hide for Plus users in normal mode (they can only share) */}
-                {(useOnlyMode || !isPlusUser) && (
+                {/* Use button: only for non-Plus users */}
+                {!isPlusUser && (
                   <Button
                     type="primary"
                     size="large"
@@ -394,29 +334,9 @@ export const VoucherPopup = ({
                       fontWeight: 500,
                     }}
                   >
-                    {useOnlyMode && isPlusUser
-                      ? t('voucher.popup.claim', 'Claim')
-                      : useOnlyMode
-                        ? t('voucher.popup.useCoupon', 'Use Coupon')
-                        : t('voucher.popup.useNow', 'Use It Now')}
-                  </Button>
-                )}
-                {/* Show share button: always when not useOnlyMode, or when Plus user in useOnlyMode */}
-                {(!useOnlyMode || (useOnlyMode && isPlusUser)) && (
-                  <Button
-                    size="large"
-                    block
-                    shape="round"
-                    onClick={handleShare}
-                    loading={creatingInvitation}
-                    style={{
-                      height: 48,
-                      fontSize: 16,
-                      fontWeight: 500,
-                      boxShadow: 'inset 0 0 0 1px rgba(0, 0, 0, 0.08)',
-                    }}
-                  >
-                    {t('voucher.popup.shareWithFriend', 'Share With Friend')}
+                    {useOnlyMode
+                      ? t('voucher.popup.useCoupon', 'Use Coupon')
+                      : t('voucher.popup.useNow', 'Use It Now')}
                   </Button>
                 )}
               </div>
@@ -424,22 +344,6 @@ export const VoucherPopup = ({
           </div>
         </div>
       </Modal>
-
-      {/* Share Poster Modal */}
-      {showSharePoster && (
-        <SharePoster
-          visible={showSharePoster}
-          onClose={() => {
-            setShowSharePoster(false);
-            onClose(); // Also close the voucher popup when SharePoster closes
-          }}
-          invitation={shareInvitation}
-          shareUrl={shareUrl}
-          discountPercent={discountPercent}
-        />
-      )}
     </>
   );
 };
-
-export default VoucherPopup;

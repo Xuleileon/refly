@@ -1,4 +1,14 @@
-import { Controller, Post, Body, UseGuards, Get, Query, Logger } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  UseGuards,
+  Get,
+  Query,
+  Logger,
+  ParseIntPipe,
+  DefaultValuePipe,
+} from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { LoginedUser } from '../../utils/decorators/user.decorator';
 import { User as UserModel } from '@prisma/client';
@@ -9,11 +19,15 @@ import {
   GetWorkflowDetailResponse,
   AbortWorkflowRequest,
   BaseResponse,
+  GetWorkflowPlanDetailResponse,
+  ListWorkflowExecutionsResponse,
+  ListOrder,
+  WorkflowExecutionStatus,
 } from '@refly/openapi-schema';
 import { buildSuccessResponse } from '../../utils';
 import { ParamsError } from '@refly/errors';
 import { workflowExecutionPO2DTO } from './workflow.dto';
-import { SkillInvokerService } from '../skill/skill-invoker.service';
+import { WorkflowPlanService } from './workflow-plan.service';
 
 @Controller('v1/workflow')
 export class WorkflowController {
@@ -21,7 +35,7 @@ export class WorkflowController {
 
   constructor(
     private readonly workflowService: WorkflowService,
-    private readonly skillInvokerService: SkillInvokerService,
+    private readonly workflowPlanService: WorkflowPlanService,
   ) {}
 
   @UseGuards(JwtAuthGuard)
@@ -77,6 +91,28 @@ export class WorkflowController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Get('list')
+  async listWorkflowExecutions(
+    @LoginedUser() user: UserModel,
+    @Query('canvasId') canvasId?: string,
+    @Query('status') status?: WorkflowExecutionStatus,
+    @Query('after', new ParseIntPipe({ optional: true })) after?: number,
+    @Query('page', new DefaultValuePipe(1), ParseIntPipe) page = 1,
+    @Query('pageSize', new DefaultValuePipe(10), ParseIntPipe) pageSize = 10,
+    @Query('order', new DefaultValuePipe('creationDesc')) order: ListOrder = 'creationDesc',
+  ): Promise<ListWorkflowExecutionsResponse> {
+    const { executions } = await this.workflowService.listWorkflowExecutions(user, {
+      canvasId,
+      status,
+      after,
+      page,
+      pageSize,
+      order,
+    });
+    return buildSuccessResponse(executions.map(workflowExecutionPO2DTO));
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Get('detail')
   async getWorkflowDetail(
     @LoginedUser() user: UserModel,
@@ -112,5 +148,19 @@ export class WorkflowController {
   ) {
     const workflowDetails = await this.workflowService.getAllWorkflowDetails(user, canvasId);
     return buildSuccessResponse(workflowDetails.map(workflowExecutionPO2DTO));
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('plan/detail')
+  async getWorkflowPlanDetail(
+    @LoginedUser() user: UserModel,
+    @Query('planId') planId: string,
+    @Query('version', new ParseIntPipe({ optional: true })) version?: number,
+  ): Promise<GetWorkflowPlanDetailResponse> {
+    const workflowPlanDetail = await this.workflowPlanService.getWorkflowPlanDetail(user, {
+      planId,
+      version,
+    });
+    return buildSuccessResponse(workflowPlanDetail);
   }
 }

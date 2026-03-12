@@ -15,6 +15,7 @@ export * from './use-find-website';
 export * from './use-find-images';
 export * from './use-find-code-artifact';
 export * from './use-find-thread-history';
+export * from './use-find-latest-variable-mentions';
 
 // Actions
 export * from './use-invoke-action';
@@ -32,9 +33,12 @@ export * from './use-canvas-id';
 export * from './use-canvas-layout';
 export * from './use-create-canvas';
 export * from './use-delete-canvas';
+export * from './use-update-canvas-title';
+export * from './use-schedule-dependency-check';
 
 // Selection and edge operations
 export * from './use-node-selection';
+export * from './use-node-edit-context';
 export * from './use-edge-operations';
 export * from './use-node-preview-control';
 export * from './use-variable-view';
@@ -48,6 +52,7 @@ export * from './use-node-execution-focus';
 
 // Workflow hooks
 export * from './use-workflow-incomplete-nodes';
+export * from './use-first-success-execution-today';
 
 // Resource operations
 export * from './use-download-file';

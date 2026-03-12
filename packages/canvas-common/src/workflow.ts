@@ -157,7 +157,11 @@ export const prepareNodeExecutions = (params: {
           const originalQuery = String(
             metadata?.query ?? metadata?.structuredData?.query ?? node.data?.title ?? '',
           );
-          const { llmInputQuery, updatedQuery } = processQueryWithMentions(originalQuery, {
+          const {
+            llmInputQuery,
+            updatedQuery,
+            resourceVars: referencedVariables,
+          } = processQueryWithMentions(originalQuery, {
             replaceVars: true,
             variables,
             lookupToolsetDefinitionById,
@@ -165,6 +169,7 @@ export const prepareNodeExecutions = (params: {
           node.data.metadata = deepmerge(node.data.metadata, {
             query: updatedQuery,
             llmInputQuery,
+            referencedVariables,
           });
         }
 
@@ -182,13 +187,18 @@ export const prepareNodeExecutions = (params: {
         const originalQuery = String(
           metadata?.query ?? metadata?.structuredData?.query ?? node.data?.title ?? '',
         );
-        const { llmInputQuery, updatedQuery } = processQueryWithMentions(originalQuery, {
+        const {
+          llmInputQuery,
+          updatedQuery,
+          resourceVars: referencedVariables,
+        } = processQueryWithMentions(originalQuery, {
           replaceVars: true,
           variables,
         });
         node.data.metadata = deepmerge(node.data.metadata, {
           query: updatedQuery,
           llmInputQuery,
+          referencedVariables,
         });
       }
       return node;
@@ -204,7 +214,7 @@ export const prepareNodeExecutions = (params: {
       : (params.startNodes?.map((sid) => nodeMap.get(sid)?.id ?? sid) ?? []);
   if (startNodes.length === 0) {
     for (const [nodeId, parents] of parentMap) {
-      if (parents.length === 0) {
+      if (parents.length === 0 || parents.indexOf(nodeId) >= 0) {
         startNodes.push(nodeId);
       }
     }

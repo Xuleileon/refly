@@ -1,18 +1,53 @@
 import { Button, Modal, Tooltip, message } from 'antd';
-import { memo, useCallback } from 'react';
+import { memo, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useDebouncedCallback } from 'use-debounce';
 import { Play, StopCircle, Preview } from 'refly-icons';
+import { useReactFlow, useNodes, useEdges } from '@xyflow/react';
 import { ActionStatus } from '@refly/openapi-schema';
 import { logEvent } from '@refly/telemetry-web';
+import { useCanvasContext } from '@refly-packages/ai-workspace-common/context/canvas';
+import { useCanvasResourcesPanelStoreShallow } from '@refly/stores';
+import { useIsLogin } from '@refly-packages/ai-workspace-common/hooks/use-is-login';
+import {
+  useGetCanvasData,
+  useListUserTools,
+} from '@refly-packages/ai-workspace-common/queries/queries';
+import type { CanvasNode } from '@refly/canvas-common';
+import type { GenericToolset, UserTool } from '@refly/openapi-schema';
+import { extractToolsetsWithNodes } from '@refly/canvas-common';
+
+/**
+ * Check if a toolset is authorized/installed.
+ * - MCP servers: installed if the server exists in userTools.
+ * - Builtin tools: always available.
+ * - OAuth tools: installed only when authorized.
+ */
+const isToolsetAuthorized = (toolset: GenericToolset, userTools: UserTool[]): boolean => {
+  if (toolset.type === 'mcp') {
+    const isAuthorized = userTools.some((t) => t.toolset?.name === toolset.name);
+    return isAuthorized;
+  }
+
+  if (toolset.builtin) {
+    return true;
+  }
+
+  const matchingUserTool = userTools.find((t) => t.key === toolset.toolset?.key);
+  if (!matchingUserTool) {
+    return false;
+  }
+
+  const isAuthorized = matchingUserTool.authorized ?? false;
+  return isAuthorized;
+};
 
 interface SkillResponseActionsProps {
   nodeIsExecuting: boolean;
   workflowIsRunning: boolean;
-  // Variant: 'node' shows two buttons (rerunFromHere and rerunSingle), 'preview' shows simple button
   variant?: 'node' | 'preview';
-  // For node variant
-  onRerunSingle?: () => void;
   onRerunFromHere?: () => void;
+  nodeId?: string;
   // For preview variant
   onRerun?: () => void;
   // Common
@@ -27,8 +62,8 @@ const SkillResponseActionsComponent = ({
   nodeIsExecuting,
   workflowIsRunning,
   variant = 'node',
-  onRerunSingle,
   onRerunFromHere,
+  nodeId,
   onRerun,
   onStop,
   extraActions,
@@ -36,35 +71,207 @@ const SkillResponseActionsComponent = ({
   status,
 }: SkillResponseActionsProps) => {
   const { t } = useTranslation();
+  const { canvasId } = useCanvasContext();
+  const { isLoggedRef, userProfile } = useIsLogin();
+  const { getNode } = useReactFlow();
+  const nodes = useNodes();
+  const edges = useEdges();
+
+  // Check if any downstream node (including the current one) has an empty prompt
+  const hasDownstreamEmptyPrompt = useMemo(() => {
+    if (!nodeId) return false;
+
+    const downstreamIds = new Set<string>([nodeId]);
+    const queue = [nodeId];
+
+    while (queue.length > 0) {
+      const currentId = queue.shift();
+      if (!currentId) continue;
+
+      const children = edges.filter((edge) => edge.source === currentId).map((edge) => edge.target);
+
+      for (const childId of children) {
+        if (!downstreamIds.has(childId)) {
+          downstreamIds.add(childId);
+          queue.push(childId);
+        }
+      }
+    }
+
+    return nodes.some((n) => {
+      if (!downstreamIds.has(n.id)) return false;
+      if (n.type !== 'skillResponse') return false;
+      const query = (n.data as any)?.metadata?.query;
+      return !query || (typeof query === 'string' && query.trim() === '');
+    });
+  }, [nodeId, nodes, edges]);
+
+  const node = nodeId ? getNode(nodeId) : null;
+  const nodeMetadata = (node?.data as any)?.metadata;
+  const nodeSelectedToolsets = nodeMetadata?.selectedToolsets;
+  const prompt = nodeMetadata?.query;
+
+  const isLogin = !!userProfile?.uid;
+  const nodeToolsets = Array.isArray(nodeSelectedToolsets) ? nodeSelectedToolsets : [];
+  const hasNodeToolsets = nodeToolsets.some((toolset) => toolset?.id && toolset.id !== 'empty');
+  const shouldCheckUserTools = !!onRerunFromHere || (!!onRerun && hasNodeToolsets);
+  const shouldCheckCanvasTools =
+    !!onRerunFromHere || (variant === 'preview' && !!onRerun && !hasNodeToolsets);
+
+  const { setToolsDependencyOpen, setToolsDependencyHighlight } =
+    useCanvasResourcesPanelStoreShallow((state) => ({
+      setToolsDependencyOpen: state.setToolsDependencyOpen,
+      setToolsDependencyHighlight: state.setToolsDependencyHighlight,
+    }));
+
+  const { data: userToolsData } = useListUserTools({}, [], {
+    enabled: isLogin && shouldCheckUserTools,
+    refetchOnWindowFocus: false,
+  });
+  const userTools = userToolsData?.data ?? [];
+
+  const { data: canvasResponse, refetch: refetchCanvasData } = useGetCanvasData(
+    { query: { canvasId: canvasId ?? '' } },
+    [],
+    {
+      enabled: !!canvasId && isLogin && shouldCheckCanvasTools,
+      refetchOnWindowFocus: false,
+    },
+  );
 
   // When workflow is running but current node is not executing, disable actions
+  const isPromptEmpty = !prompt || (typeof prompt === 'string' && prompt.trim() === '');
   const disabled = readonly || workflowIsRunning;
+  // If not executing and prompt is empty, disable run actions
+  const actionDisabled = disabled || (!nodeIsExecuting && isPromptEmpty);
 
   const isReRunning = status && status !== 'init';
   const singleButtonTitle = nodeIsExecuting
     ? t('canvas.skillResponse.stopSingle')
-    : isReRunning
-      ? t('canvas.skillResponse.rerunSingle')
-      : t('canvas.skillResponse.runSingle');
+    : variant === 'preview'
+      ? null
+      : isReRunning
+        ? t('canvas.skillResponse.rerunSingle')
+        : t('canvas.skillResponse.runSingle');
 
-  const handleRerunSingleClick = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (onRerunSingle) {
-        onRerunSingle();
+  const singleButtonTooltip =
+    !nodeIsExecuting && isPromptEmpty
+      ? t('canvas.skillResponse.promptRequired')
+      : singleButtonTitle;
+
+  const checkAndOpenToolsDependency = useCallback(async (): Promise<boolean> => {
+    // Tool dependency checking requires login and a valid canvasId.
+    if (!shouldCheckCanvasTools || !isLoggedRef.current || !canvasId) {
+      return false;
+    }
+
+    // Ensure we have canvas nodes to calculate tool dependencies.
+    const initialNodes = canvasResponse?.data?.nodes;
+    let effectiveNodes: CanvasNode[] = Array.isArray(initialNodes) ? initialNodes : [];
+    if (!effectiveNodes.length) {
+      try {
+        const result = await refetchCanvasData();
+        const nextNodes = (result as unknown as { data?: { data?: { nodes?: CanvasNode[] } } })
+          ?.data?.data?.nodes;
+        effectiveNodes = Array.isArray(nextNodes) ? nextNodes : [];
+      } catch {
+        effectiveNodes = [];
       }
-    },
-    [onRerunSingle],
-  );
+    }
+
+    const uninstalledCount = (() => {
+      if (!effectiveNodes.length) return 0;
+      const toolsetsWithNodes = extractToolsetsWithNodes(effectiveNodes);
+      return toolsetsWithNodes.filter((tool) => !isToolsetAuthorized(tool.toolset, userTools))
+        .length;
+    })();
+
+    if (uninstalledCount <= 0) {
+      return false;
+    }
+
+    message.warning(t('canvas.workflow.run.installToolsBeforeRunning'));
+    setToolsDependencyOpen(canvasId, true);
+    setToolsDependencyHighlight(canvasId, true);
+    return true;
+  }, [
+    shouldCheckCanvasTools,
+    canvasId,
+    canvasResponse,
+    isLoggedRef,
+    refetchCanvasData,
+    setToolsDependencyHighlight,
+    setToolsDependencyOpen,
+    t,
+    userTools,
+  ]);
+
+  const checkAndOpenNodeToolsDependency = useCallback(async (): Promise<boolean> => {
+    // Single-node tool dependency checking requires login and a valid canvasId.
+    if (!isLoggedRef.current || !canvasId) {
+      return false;
+    }
+
+    // If current node doesn't use any tools, there's nothing to check.
+    if (!hasNodeToolsets) {
+      return false;
+    }
+
+    const missingToolsets = nodeToolsets.filter((toolset) => {
+      if (!toolset?.id || toolset.id === 'empty') {
+        return false;
+      }
+      const isAuthorized = isToolsetAuthorized(toolset, userTools);
+      return !isAuthorized;
+    });
+
+    const missingCount = missingToolsets.length;
+
+    if (missingCount <= 0) {
+      return false;
+    }
+
+    message.warning(t('canvas.workflow.run.installToolsBeforeRunning'));
+    setToolsDependencyOpen(canvasId, true);
+    setToolsDependencyHighlight(canvasId, true);
+    return true;
+  }, [
+    canvasId,
+    hasNodeToolsets,
+    isLoggedRef,
+    nodeToolsets,
+    setToolsDependencyHighlight,
+    setToolsDependencyOpen,
+    t,
+    userTools,
+  ]);
 
   const handleRerunFromHereClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      if (onRerunFromHere) {
+      if (!onRerunFromHere) {
+        return;
+      }
+
+      void (async () => {
+        const blocked = await checkAndOpenToolsDependency();
+        if (blocked) {
+          return;
+        }
         onRerunFromHere();
+      })();
+    },
+    [checkAndOpenToolsDependency, onRerunFromHere],
+  );
+
+  const handleRerunClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (onRerun) {
+        onRerun();
       }
     },
-    [onRerunFromHere],
+    [onRerun],
   );
 
   const handleStopClick = useCallback(
@@ -100,16 +307,6 @@ const SkillResponseActionsComponent = ({
     [nodeIsExecuting, onStop, t, logEvent],
   );
 
-  const handleRerunClick = useCallback(
-    (e: React.MouseEvent) => {
-      e.stopPropagation();
-      if (onRerun) {
-        onRerun();
-      }
-    },
-    [onRerun],
-  );
-
   // Determine which icon to show
   const iconSize = variant === 'preview' ? 20 : 12;
   const iconClassName = variant === 'preview' ? '' : 'translate-y-[-1px]';
@@ -123,17 +320,47 @@ const SkillResponseActionsComponent = ({
       ? 'flex items-center justify-center'
       : '!h-5 !w-5 p-0 flex items-center justify-center hover:!bg-refly-tertiary-hover';
 
+  const handleToggleWorkflowRun = useDebouncedCallback(
+    async (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (nodeIsExecuting) {
+        handleStopClick(e);
+      } else {
+        let blocked = false;
+
+        // In preview mode, if we don't have node toolsets but have onRerun, check workflow-level tools
+        if (variant === 'preview' && !hasNodeToolsets && onRerun) {
+          blocked = await checkAndOpenToolsDependency();
+        } else {
+          blocked = await checkAndOpenNodeToolsDependency();
+        }
+
+        if (blocked) {
+          return;
+        }
+        handleRerunClick(e);
+      }
+    },
+    500,
+    {
+      leading: true,
+      trailing: false,
+    },
+  );
+
   // Preview variant: simple button(s)
   if (variant === 'preview') {
     return (
       <>
-        <Button
-          type="text"
-          icon={icon}
-          onClick={nodeIsExecuting ? handleStopClick : handleRerunClick}
-          disabled={disabled}
-          className={buttonClassName}
-        />
+        <Tooltip title={singleButtonTooltip} arrow={false}>
+          <Button
+            type="text"
+            icon={icon}
+            onClick={handleToggleWorkflowRun}
+            disabled={actionDisabled}
+            className={buttonClassName}
+          />
+        </Tooltip>
         {extraActions}
       </>
     );
@@ -141,27 +368,37 @@ const SkillResponseActionsComponent = ({
 
   return (
     <>
-      <Tooltip title={t('canvas.skillResponse.rerunFromHere')}>
+      <Tooltip
+        arrow={false}
+        title={
+          <div className="text-[13px]">
+            {hasDownstreamEmptyPrompt
+              ? isPromptEmpty && !edges.some((e) => e.source === nodeId)
+                ? t('canvas.skillResponse.promptRequired')
+                : t('canvas.skillResponse.downstreamAgentsMissingPrompts')
+              : t('canvas.skillResponse.rerunFromHere')}
+          </div>
+        }
+      >
         <Button
           type="text"
           size="small"
           icon={<Preview size={iconSize} className={iconClassName} />}
           onClick={handleRerunFromHereClick}
-          disabled={disabled || nodeIsExecuting}
+          disabled={actionDisabled || nodeIsExecuting || hasDownstreamEmptyPrompt}
           className={buttonClassName}
-          title={t('canvas.skillResponse.rerunFromHere')}
         />
       </Tooltip>
 
-      <Tooltip title={singleButtonTitle}>
+      <Tooltip title={<div className="text-[13px]">{singleButtonTooltip}</div>} arrow={false}>
         <Button
           type="text"
           size="small"
           icon={icon}
-          onClick={nodeIsExecuting ? handleStopClick : handleRerunSingleClick}
-          disabled={disabled}
+          onClick={handleToggleWorkflowRun}
+          disabled={actionDisabled}
           className={buttonClassName}
-          title={singleButtonTitle}
+          title={singleButtonTooltip}
         />
       </Tooltip>
     </>

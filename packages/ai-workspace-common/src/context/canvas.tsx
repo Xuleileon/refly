@@ -124,6 +124,28 @@ const createCanvasVersion = async (canvasId: string, state: CanvasState) => {
 
 const CanvasContext = createContext<CanvasContextType | null>(null);
 
+// Per-canvas initialization tracker to prevent duplicate initializations
+// Uses Map keyed by canvasId so concurrent CanvasProvider instances don't interfere
+interface CanvasInitState {
+  lastInitializedId: string | null;
+  lastInitTime: number;
+  lastCleanupTime: number;
+}
+
+const globalCanvasInitTracker = new Map<string, CanvasInitState>();
+const MIN_REINIT_INTERVAL_MS = 500; // Minimum 500ms between initializations
+
+const getCanvasInitState = (canvasId: string): CanvasInitState => {
+  if (!globalCanvasInitTracker.has(canvasId)) {
+    globalCanvasInitTracker.set(canvasId, {
+      lastInitializedId: null,
+      lastInitTime: 0,
+      lastCleanupTime: 0,
+    });
+  }
+  return globalCanvasInitTracker.get(canvasId)!;
+};
+
 const getInternalState = ({
   nodes,
   edges,
@@ -154,13 +176,21 @@ const getInternalState = ({
   };
 };
 
+export interface SnapshotData {
+  title?: string;
+  nodes: CanvasNode[];
+  edges: CanvasEdge[];
+}
+
 export const CanvasProvider = ({
   canvasId,
   readonly = false,
+  snapshotData,
   children,
 }: {
   canvasId: string;
   readonly?: boolean;
+  snapshotData?: SnapshotData;
   children: React.ReactNode;
 }) => {
   const { t } = useTranslation();
@@ -207,29 +237,31 @@ export const CanvasProvider = ({
     enabled: !readonly && !!canvasId,
   });
 
-  // Use the hook to fetch canvas data when in readonly mode
+  // Use the hook to fetch canvas data when in readonly mode (only when snapshotData is not provided)
   const {
     data: canvasData,
     error: canvasError,
     loading: shareLoading,
-  } = useFetchShareData<SharedCanvasData>(readonly ? canvasId : undefined);
+  } = useFetchShareData<SharedCanvasData>(readonly && !snapshotData ? canvasId : undefined);
 
-  // Check if it's a 404 error
+  // Check if it's a 404 error (only relevant when fetching share data)
   const shareNotFound = useMemo(() => {
-    if (!readonly || shareLoading || !canvasError) return false;
+    if (!readonly || snapshotData || shareLoading || !canvasError) return false;
     return (
       !canvasData ||
       canvasError.message.includes('404') ||
       canvasError.message.includes('Failed to fetch share data: 404')
     );
-  }, [canvasError, canvasData, shareLoading, readonly]);
+  }, [canvasError, canvasData, shareLoading, readonly, snapshotData]);
 
   // Set canvas data from API response when in readonly mode
   useEffect(() => {
     if (readonly) {
-      if (!canvasData) return;
+      // Use snapshotData if provided, otherwise use canvasData from share endpoint
+      const dataSource = snapshotData || canvasData;
+      if (!dataSource) return;
       const { nodeLookup, parentLookup, connectionLookup, edgeLookup } = getState();
-      const { nodes, edges } = canvasData;
+      const { nodes, edges } = dataSource;
       const internalState = getInternalState({
         nodes: nodes && Array.isArray(nodes) ? (nodes as unknown as Node[]) : [],
         edges: edges && Array.isArray(edges) ? (edges as unknown as Edge[]) : [],
@@ -243,7 +275,7 @@ export const CanvasProvider = ({
       if (!canvasDetail?.data?.title) return;
       setCanvasTitle(canvasId, canvasDetail.data.title);
     }
-  }, [readonly, canvasData, canvasDetail, canvasId]);
+  }, [readonly, canvasData, canvasDetail, canvasId, snapshotData]);
 
   const handleConflictResolution = useCallback(
     (canvasId: string, conflict: VersionConflict): Promise<'local' | 'remote'> => {
@@ -773,10 +805,37 @@ export const CanvasProvider = ({
   useEffect(() => {
     if (readonly) return;
 
+    const now = Date.now();
+    const initState = getCanvasInitState(canvasId);
+    const timeSinceLastInit = now - initState.lastInitTime;
+    const timeSinceLastCleanup = now - initState.lastCleanupTime;
+    const lastCanvasId = initState.lastInitializedId;
+
+    // Skip initialization if:
+    // 1. Same canvasId AND no cleanup happened recently AND time is too soon
+    const isSameCanvas = lastCanvasId === canvasId;
+    const hadRecentCleanup = timeSinceLastCleanup < MIN_REINIT_INTERVAL_MS;
+    const isTooSoon = timeSinceLastInit < MIN_REINIT_INTERVAL_MS;
+
+    // If we had a recent cleanup for the same canvas, we need to reinitialize even if it's "too soon"
+    // because the cleanup cleared the canvas data
+    if (isSameCanvas && isTooSoon && !hadRecentCleanup) {
+      // Return WITHOUT a cleanup function - we don't want to clean up
+      return;
+    }
+
+    initState.lastInitializedId = canvasId;
+    initState.lastInitTime = now;
     setSyncFailureCount(0);
     initialFetchCanvasState(canvasId);
 
     return () => {
+      const state = getCanvasInitState(canvasId);
+      state.lastCleanupTime = Date.now(); // Record cleanup time
+
+      // DON'T reset the global ref here - let it persist to prevent rapid re-initializations
+      // It will be reset by the next different canvasId or after MIN_REINIT_INTERVAL_MS
+
       // Cancel pending debounced calls to prevent race conditions
       initialFetchCanvasState.cancel();
       syncCanvasDataDebounced.flush();
@@ -822,10 +881,10 @@ export const CanvasProvider = ({
         loading,
         canvasId,
         readonly,
-        shareLoading,
+        shareLoading: snapshotData ? false : shareLoading,
         shareNotFound,
         syncFailureCount,
-        shareData: canvasData ?? undefined,
+        shareData: (snapshotData as SharedCanvasData) ?? canvasData ?? undefined,
         lastUpdated,
         forceSyncState,
         undo,
@@ -846,10 +905,10 @@ export const CanvasProvider = ({
   );
 };
 
-export const useCanvasContext = () => {
+export const useCanvasContext = (optional = false) => {
   const context = useContext(CanvasContext);
-  if (!context) {
+  if (!context && !optional) {
     throw new Error('useCanvasContext must be used within a CanvasProvider');
   }
-  return context;
+  return context ?? null;
 };

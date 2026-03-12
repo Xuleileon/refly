@@ -1,15 +1,20 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Attachment, Resend } from 'resend';
+import { Attachment, ErrorResponse, Resend } from 'resend';
 import { SendEmailRequest, User } from '@refly/openapi-schema';
 import { PrismaService } from '../common/prisma.service';
-import { ParamsError } from '@refly/errors';
+import { ParamsError, EmailSendError } from '@refly/errors';
 import { MiscService } from '../misc/misc.service';
+import { guard, extractFileId, generateFilenameWithExtension } from '@refly/utils';
 
 @Injectable()
 export class NotificationService {
   private readonly logger = new Logger(NotificationService.name);
   private readonly resend: Resend;
+  private readonly maxRetries: number;
+  private readonly baseDelayMs: number;
+  private lastEmailSentAt = 0;
+  private readonly minTimeBetweenEmailsMs: number;
 
   constructor(
     private readonly configService: ConfigService,
@@ -17,6 +22,90 @@ export class NotificationService {
     private readonly miscService: MiscService,
   ) {
     this.resend = new Resend(this.configService.get('email.resendApiKey'));
+    this.maxRetries = this.configService.get<number>('email.maxRetries') ?? 3;
+    this.baseDelayMs = this.configService.get<number>('email.baseDelayMs') ?? 500;
+    this.minTimeBetweenEmailsMs =
+      this.configService.get<number>('email.minTimeBetweenEmailsMs') ?? 500;
+  }
+
+  /**
+   * Ensure minimum time between email sends to respect rate limits
+   */
+  private async enforceRateLimit(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastEmail = now - this.lastEmailSentAt;
+
+    if (timeSinceLastEmail < this.minTimeBetweenEmailsMs) {
+      const delayNeeded = this.minTimeBetweenEmailsMs - timeSinceLastEmail;
+      this.logger.debug(`Rate limiting: waiting ${delayNeeded}ms before sending next email`);
+      await new Promise((resolve) => setTimeout(resolve, delayNeeded));
+    }
+
+    this.lastEmailSentAt = Date.now();
+  }
+
+  /**
+   * Check if error is rate limit related
+   */
+  private isRateLimitError(error: ErrorResponse): boolean {
+    return (
+      error?.name === 'rate_limit_exceeded' ||
+      error?.message?.toLowerCase().includes('rate') ||
+      error?.message?.toLowerCase().includes('limit')
+    );
+  }
+
+  /**
+   * Send email with retry logic for rate limit errors using guard.retry
+   * @param emailData - Email data to send
+   * @returns Resend response
+   */
+  private async sendEmailWithRetry(emailData: {
+    from: string;
+    to: string;
+    subject: string;
+    html: string;
+    attachments?: Attachment[];
+  }): Promise<any> {
+    return guard
+      .retry(
+        async () => {
+          // Enforce rate limit before sending
+          await this.enforceRateLimit();
+
+          const res = await this.resend.emails.send(emailData);
+
+          // Check for rate limit error in response
+          if (res.error) {
+            if (this.isRateLimitError(res.error)) {
+              // Throw to trigger retry
+              throw new Error(`Rate limit exceeded: ${res.error.message}`);
+            }
+            // Other errors should not be retried
+            throw new Error(res.error.message);
+          }
+
+          return res;
+        },
+        {
+          maxAttempts: this.maxRetries,
+          initialDelay: this.baseDelayMs,
+          maxDelay: this.baseDelayMs * 2 ** (this.maxRetries - 1),
+          backoffFactor: 2,
+          retryIf: (error: any) => this.isRateLimitError(error),
+          onRetry: (error: any, attempt: number) => {
+            this.logger.warn(
+              `Rate limit error detected. Retrying... (attempt ${attempt}/${this.maxRetries}): ${error.message}`,
+            );
+          },
+        },
+      )
+      .orThrow((error: any) => {
+        this.logger.error(
+          `Failed to send email after ${this.maxRetries} retries: ${error.message}`,
+        );
+        return new EmailSendError(error.message);
+      });
   }
 
   /**
@@ -29,17 +118,57 @@ export class NotificationService {
     return emailRegex.test(email);
   }
 
-  private async processAttachmentURL(url: string): Promise<Attachment> {
+  /**
+   * Look up file metadata from database by file ID
+   * Only returns metadata if the file belongs to the requesting user (ownership check)
+   */
+  private async getFileMetadata(
+    fileId: string,
+    userUid?: string,
+  ): Promise<{ name: string; type: string | null } | null> {
+    try {
+      // Skip lookup if no user context (security: don't leak file metadata)
+      if (!userUid) {
+        return null;
+      }
+
+      const file = await this.prisma.driveFile.findFirst({
+        where: {
+          fileId,
+          uid: userUid, // Ownership check: only return files owned by this user
+        },
+        select: { name: true, type: true },
+      });
+      return file;
+    } catch (error) {
+      this.logger.warn(`Failed to fetch file metadata for ${fileId}: ${error.message}`);
+      return null;
+    }
+  }
+
+  private async processAttachmentURL(url: string, userUid?: string): Promise<Attachment> {
     const privateStaticEndpoint = this.configService
       .get('static.private.endpoint')
       ?.replace(/\/$/, '');
     const payloadMode = this.configService.get<'base64' | 'url'>('email.payloadMode');
 
+    // Try to extract file ID from URL to get proper filename
+    const fileId = extractFileId(url);
+    let filename = url.split('/').pop() ?? 'attachment';
+
+    if (fileId) {
+      // Pass userUid for ownership check - only resolve metadata for user's own files
+      const metadata = await this.getFileMetadata(fileId, userUid);
+      if (metadata) {
+        filename = generateFilenameWithExtension(metadata.name, metadata.type ?? '');
+      }
+    }
+
     // For external URLs, always use path parameter
     if (!url.startsWith(privateStaticEndpoint)) {
       return {
         path: url,
-        filename: url.split('/').pop() ?? 'attachment',
+        filename,
       };
     }
 
@@ -51,13 +180,13 @@ export class NotificationService {
 
       return {
         content: base64Content,
-        filename: url.split('/').pop() ?? 'attachment',
+        filename,
       };
     } else if (payloadMode === 'url') {
       const externalUrl = await this.miscService.generateTempPublicURL(storageKey, 60 * 60 * 24);
       return {
         path: externalUrl,
-        filename: url.split('/').pop() ?? 'attachment',
+        filename,
       };
     } else {
       throw new Error('Invalid payload mode');
@@ -168,23 +297,26 @@ export class NotificationService {
 
     let attachments: Attachment[] = [];
     if (attachmentUrls) {
-      attachments = await Promise.all(attachmentUrls.map((url) => this.processAttachmentURL(url)));
+      attachments = await Promise.all(
+        attachmentUrls.map((url) => this.processAttachmentURL(url, user?.uid)),
+      );
     }
 
-    const res = await this.resend.emails.send({
-      from: sender,
-      to: receiver,
-      subject,
-      html,
-      attachments,
-    });
-
-    this.logger.log(`Email sent successfully to ${receiver}`);
-
-    if (res.error) {
-      throw new Error(res.error?.message);
+    try {
+      await this.sendEmailWithRetry({
+        from: sender,
+        to: receiver,
+        subject,
+        html,
+        attachments,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new EmailSendError(detail);
     }
 
-    this.logger.log(`Email sent to successfully in ${new Date().getTime() - now.getTime()}ms`);
+    this.logger.log(
+      `Email sent successfully to ${receiver} in ${new Date().getTime() - now.getTime()}ms`,
+    );
   }
 }

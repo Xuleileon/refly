@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { FormDefinition, FormSubmission } from '@refly/openapi-schema';
 import { ConfigService } from '@nestjs/config';
+import { updateUserProperties } from '@refly/telemetry-node';
 
 @Injectable()
 export class FormService {
@@ -9,6 +10,24 @@ export class FormService {
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
   ) {}
+
+  private isOnboardingEnabled(): boolean {
+    return this.configService.get('auth.onboarding.enabled') ?? false;
+  }
+
+  private extractRoleFromAnswers(answers: string): string | null {
+    if (!answers?.trim()) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(answers) as { role?: unknown } | null;
+      const role = typeof parsed?.role === 'string' ? parsed.role.trim() : null;
+      return role || null;
+    } catch {
+      return null;
+    }
+  }
 
   async getFormDefinition(_uid: string): Promise<FormDefinition | null> {
     const formDefinition = await this.prisma.formDefinition.findFirst();
@@ -42,7 +61,7 @@ export class FormService {
     // Update user preferences
     const user = await this.prisma.user.findUnique({
       where: { uid },
-      select: { preferences: true },
+      select: { email: true, preferences: true, uid: true },
     });
 
     const currentPreferences = user?.preferences ? JSON.parse(user.preferences) : {};
@@ -57,19 +76,50 @@ export class FormService {
         preferences: JSON.stringify(updatedPreferences),
       },
     });
+
+    const role = this.extractRoleFromAnswers(formSubmission.answers);
+    if (role) {
+      updateUserProperties({ uid, email: user?.email }, { user_identity: role });
+    }
   }
 
-  async hasFilledForm(uid: string): Promise<boolean> {
-    const user = await this.prisma.user.findUnique({
-      where: { uid },
-      select: { preferences: true },
-    });
-
-    if (!user?.preferences) {
-      return false;
+  async hasFilledForm(
+    uid: string,
+    preferenceJson?: string,
+    answersJson?: string,
+  ): Promise<{ hasFilledForm: boolean; identity: string | null }> {
+    // If onboarding is disabled, skip form requirement
+    if (!this.isOnboardingEnabled()) {
+      return { hasFilledForm: true, identity: null };
     }
 
-    const preferences = JSON.parse(user.preferences);
-    return preferences.hasFilledForm ?? true;
+    const [user, answers] = await Promise.all([
+      preferenceJson === undefined
+        ? this.prisma.user.findUnique({
+            where: { uid },
+            select: { preferences: true },
+          })
+        : Promise.resolve(null),
+      answersJson === undefined
+        ? this.prisma.formSubmission.findFirst({
+            where: { uid },
+            select: { answers: true },
+          })
+        : Promise.resolve(answersJson ? { answers: answersJson } : null),
+    ]);
+
+    const finalPreferenceJson = preferenceJson ?? user?.preferences;
+    const finalAnswersJson = answersJson ?? answers?.answers;
+    const identity = this.extractRoleFromAnswers(finalAnswersJson);
+
+    if (!finalPreferenceJson) {
+      return { hasFilledForm: false, identity: identity ?? null };
+    }
+
+    const preferences = JSON.parse(finalPreferenceJson);
+    return {
+      hasFilledForm: preferences.hasFilledForm ?? true,
+      identity: identity ?? null,
+    };
   }
 }

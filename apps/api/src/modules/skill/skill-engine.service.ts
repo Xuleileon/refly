@@ -7,6 +7,7 @@ import { SkillEngine, SkillEngineOptions } from '@refly/skill-template';
 import { genImageID, runModuleInitWithTimeoutAndRetry } from '@refly/utils';
 import { buildSuccessResponse } from '../../utils';
 import { genBaseRespDataFromError } from '../../utils/exception';
+import { User, SandboxExecuteRequest, SandboxExecuteResponse } from '@refly/openapi-schema';
 import { ActionService } from '../action/action.service';
 import { AuthService } from '../auth/auth.service';
 import { CanvasSyncService } from '../canvas-sync/canvas-sync.service';
@@ -26,8 +27,11 @@ import { ProviderService } from '../provider/provider.service';
 import { RAGService } from '../rag/rag.service';
 import { SearchService } from '../search/search.service';
 import { ShareCreationService } from '../share/share-creation.service';
+import { SandboxService } from '../sandbox/sandbox.service';
 import { ScaleboxService } from '../tool/sandbox/scalebox.service';
 import { ToolService } from '../tool/tool.service';
+import { PtcEnvService } from '../tool/ptc';
+import { WorkflowPlanService } from '../workflow/workflow-plan.service';
 
 @Injectable()
 export class SkillEngineService implements OnModuleInit {
@@ -47,8 +51,11 @@ export class SkillEngineService implements OnModuleInit {
   private engine: SkillEngine;
   private canvasSyncService: CanvasSyncService;
   private toolService: ToolService;
+  private sandboxService: SandboxService;
   private scaleboxService: ScaleboxService;
+  private ptcEnvService: PtcEnvService;
   private shareCreationService: ShareCreationService;
+  private workflowPlanService: WorkflowPlanService;
   constructor(
     private moduleRef: ModuleRef,
     private config: ConfigService,
@@ -75,8 +82,11 @@ export class SkillEngineService implements OnModuleInit {
         this.miscService = this.moduleRef.get(MiscService, { strict: false });
         this.canvasSyncService = this.moduleRef.get(CanvasSyncService, { strict: false });
         this.toolService = this.moduleRef.get(ToolService, { strict: false });
+        this.sandboxService = this.moduleRef.get(SandboxService, { strict: false });
         this.scaleboxService = this.moduleRef.get(ScaleboxService, { strict: false });
+        this.ptcEnvService = this.moduleRef.get(PtcEnvService, { strict: false });
         this.shareCreationService = this.moduleRef.get(ShareCreationService, { strict: false });
+        this.workflowPlanService = this.moduleRef.get(WorkflowPlanService, { strict: false });
       },
       {
         logger: this.logger,
@@ -130,6 +140,15 @@ export class SkillEngineService implements OnModuleInit {
       deleteCanvas: async (user, param) => {
         await this.canvasService.deleteCanvas(user, param);
         return buildSuccessResponse({});
+      },
+      getCanvasData: async (user, params) => {
+        const rawData = await this.canvasService.getCanvasRawData(user, params.canvasId);
+        return {
+          title: rawData.title ?? '',
+          nodes: rawData.nodes ?? [],
+          edges: rawData.edges ?? [],
+          variables: rawData.variables,
+        };
       },
       getDocumentDetail: async (user, param) => {
         const document = await this.documentService.getDocumentDetail(user, param);
@@ -248,10 +267,12 @@ export class SkillEngineService implements OnModuleInit {
         const result = await this.driveService.getDriveFileDetail(user, fileId);
         return result;
       },
-      listFiles: async (user, canvasId) => {
+      listFiles: async (user, canvasId, source) => {
         const result = await this.driveService.listDriveFiles(user, {
           canvasId,
           scope: 'present',
+          source,
+          pageSize: 100,
         });
         return result;
       },
@@ -276,8 +297,77 @@ export class SkillEngineService implements OnModuleInit {
       genImageID: async () => {
         return genImageID();
       },
-      execute: async (user, req) => {
+      execute: async (user: User, req: SandboxExecuteRequest): Promise<SandboxExecuteResponse> => {
+        // Inject PTC environment variables if enabled
+        if (req.context?.ptcEnabled) {
+          const ptcEnvVars = await this.ptcEnvService.getPtcEnvVars(user, req);
+
+          // Ensure context and env exist
+          req.context = req.context || {};
+          req.context.env = {
+            ...req.context.env,
+            ...ptcEnvVars,
+          };
+        }
+
+        const whiteList =
+          this.config
+            .get<string>('sandbox.whiteList')
+            ?.split(',')
+            ?.map((s) => s.trim()) || [];
+        const blackList =
+          this.config
+            .get<string>('sandbox.blackList')
+            ?.split(',')
+            ?.map((s) => s.trim()) || [];
+        const randomRateStr = this.config.get<string>('sandbox.randomRate') || '0';
+        const randomRate = Number.parseInt(randomRateStr, 10);
+
+        const useHttpSandbox = (() => {
+          if (blackList.includes(user.uid)) return false;
+          if (whiteList.includes(user.uid)) return true;
+
+          // Hash uid to 0-99 range for consistent random distribution
+          let hash = 0;
+          for (let i = 0; i < user.uid.length; i++) {
+            hash = (hash << 5) - hash + user.uid.charCodeAt(i);
+            hash = hash & hash; // Convert to 32bit integer
+          }
+          const bucket = Math.abs(hash) % 100;
+          return bucket < randomRate;
+        })();
+
+        this.logger.info(
+          {
+            uid: user.uid,
+            useHttpSandbox,
+            randomRate,
+            inWhiteList: whiteList.includes(user.uid),
+            inBlackList: blackList.includes(user.uid),
+          },
+          'Sandbox routing decision',
+        );
+
+        if (useHttpSandbox) {
+          return await this.sandboxService.execute(user, req);
+        }
+
         return await this.scaleboxService.execute(user, req);
+      },
+      generateWorkflowPlan: async (user, params) => {
+        return await this.workflowPlanService.generateWorkflowPlan(user, params);
+      },
+      patchWorkflowPlan: async (user, params) => {
+        return await this.workflowPlanService.patchWorkflowPlan(user, params);
+      },
+      getLatestWorkflowPlan: async (user, params) => {
+        return await this.workflowPlanService.getLatestWorkflowPlan(user, params);
+      },
+      getWorkflowPlanById: async (user, params) => {
+        return await this.workflowPlanService.getWorkflowPlanDetail(user, params);
+      },
+      getLatestWorkflowPlanByCanvas: async (user, params) => {
+        return await this.workflowPlanService.getLatestWorkflowPlanByCanvas(user, params);
       },
     };
   };

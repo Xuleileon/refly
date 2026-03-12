@@ -1,4 +1,4 @@
-import React, { useMemo, useCallback, useState, useEffect } from 'react';
+import React, { useMemo, useCallback, useState, useEffect, lazy, Suspense } from 'react';
 import { Button, Layout, Divider } from 'antd';
 import {
   useLocation,
@@ -7,13 +7,30 @@ import {
 } from '@refly-packages/ai-workspace-common/utils/router';
 
 import cn from 'classnames';
+import { isSelfHosted } from '@refly/ui-kit';
 import { Logo } from '@refly-packages/ai-workspace-common/components/common/logo';
-// components
+// components - Lazy load Modal components to reduce initial bundle size
 import { useTranslation } from 'react-i18next';
-import { SettingModal } from '@refly-packages/ai-workspace-common/components/settings';
-import { InvitationModal } from '@refly-packages/ai-workspace-common/components/settings/invitation-modal';
-import { StorageExceededModal } from '@refly-packages/ai-workspace-common/components/subscription/storage-exceeded-modal';
-import { CreditInsufficientModal } from '@refly-packages/ai-workspace-common/components/subscription/credit-insufficient-modal';
+const SettingModal = lazy(() =>
+  import('@refly-packages/ai-workspace-common/components/settings').then((m) => ({
+    default: m.SettingModal,
+  })),
+);
+const InvitationModal = lazy(() =>
+  import('@refly-packages/ai-workspace-common/components/settings/invitation-modal').then((m) => ({
+    default: m.InvitationModal,
+  })),
+);
+const StorageExceededModal = lazy(() =>
+  import('@refly-packages/ai-workspace-common/components/subscription/storage-exceeded-modal').then(
+    (m) => ({ default: m.StorageExceededModal }),
+  ),
+);
+const CreditInsufficientModal = lazy(() =>
+  import(
+    '@refly-packages/ai-workspace-common/components/subscription/credit-insufficient-modal'
+  ).then((m) => ({ default: m.CreditInsufficientModal })),
+);
 // hooks
 import { useHandleSiderData } from '@refly-packages/ai-workspace-common/hooks/use-handle-sider-data';
 import { SettingsModalActiveTab, useSiderStoreShallow } from '@refly/stores';
@@ -28,16 +45,16 @@ import {
   SideLeft,
   Settings,
   MarketPlace,
+  History,
 } from 'refly-icons';
 import { ContactUsPopover } from '@refly-packages/ai-workspace-common/components/contact-us-popover';
 import InviteIcon from '@refly-packages/ai-workspace-common/assets/invite-sider.svg';
-import GiftPromotionIcon from '@refly-packages/ai-workspace-common/assets/community.svg';
-import {
-  useKnowledgeBaseStoreShallow,
-  useUserStoreShallow,
-  useSubscriptionStoreShallow,
-} from '@refly/stores';
-import { CanvasTemplateModal } from '@refly-packages/ai-workspace-common/components/canvas-template';
+import { useKnowledgeBaseStoreShallow, useUserStoreShallow } from '@refly/stores';
+const CanvasTemplateModal = lazy(() =>
+  import('@refly-packages/ai-workspace-common/components/canvas-template').then((m) => ({
+    default: m.CanvasTemplateModal,
+  })),
+);
 import { SiderLoggedOut } from './sider-logged-out';
 
 import './layout.scss';
@@ -73,24 +90,22 @@ const SiderSectionHeader = ({
     >
       <div className="flex items-center gap-2 min-w-0 flex-1">
         <div className="flex-shrink-0 flex items-center">{icon}</div>
-        <span
-          className={cn(
-            'truncate transition-all duration-300',
-            isActive ? 'font-semibold' : 'font-normal',
-            collapsed ? 'opacity-0 w-0 overflow-hidden' : 'opacity-100 w-auto',
-          )}
-        >
-          {title}
-        </span>
+        {!collapsed && (
+          <span
+            className={cn(
+              'truncate transition-opacity duration-300',
+              isActive ? 'font-semibold' : 'font-normal',
+            )}
+          >
+            {title}
+          </span>
+        )}
       </div>
-      {actionIcon && onActionClick && (
+      {actionIcon && onActionClick && !collapsed && (
         <Button
           type="text"
           size="small"
-          className={cn(
-            'box-border px-1 text-refly-text-0 transition-opacity duration-200',
-            collapsed ? 'opacity-0 w-0 overflow-hidden' : 'opacity-0 group-hover:opacity-100',
-          )}
+          className="box-border px-1 text-refly-text-0 transition-opacity duration-200 opacity-0 group-hover:opacity-100"
           icon={actionIcon}
           onClick={(e) => {
             e.stopPropagation();
@@ -191,7 +206,7 @@ export const PromotionItem = React.memo(
         {/* Header with gift icon and title */}
         <div className="flex items-center gap-1">
           <div className="flex-shrink-0">
-            <img src={GiftPromotionIcon} className="w-12 h-15" />
+            <img src={'https://static.refly.ai/static/community.webp'} className="w-12 h-15" />
           </div>
           <div className="flex flex-col pl-1">
             <div className="flex items-baseline flex-wrap">
@@ -301,10 +316,6 @@ const SiderLoggedIn = (props: { source: 'sider' | 'popover' }) => {
     userProfile: state.userProfile,
   }));
 
-  const { userType } = useSubscriptionStoreShallow((state) => ({
-    userType: state.userType,
-  }));
-
   const {
     collapseState,
     setCollapse,
@@ -358,6 +369,9 @@ const SiderLoggedIn = (props: { source: 'sider' | 'popover' }) => {
     if (path.startsWith('/workflow-list')) {
       return 'canvas';
     }
+    if (path.startsWith('/run-history')) {
+      return 'runHistory';
+    }
     if (path.startsWith('/app-manager')) {
       return 'appManager';
     }
@@ -379,30 +393,44 @@ const SiderLoggedIn = (props: { source: 'sider' | 'popover' }) => {
 
   // Menu items configuration
   const menuItems = useMemo(
+    () =>
+      [
+        {
+          icon: <File key="home" style={{ fontSize: 20 }} />,
+          title: t('loggedHomePage.siderMenu.home'),
+          onActionClick: () => navigate('/'),
+          key: 'home',
+        },
+        {
+          icon: <Flow key="canvas" style={{ fontSize: 20 }} />,
+          title: t('loggedHomePage.siderMenu.canvas'),
+          onActionClick: () => navigate('/workflow-list'),
+          key: 'canvas',
+        },
+        {
+          icon: <Project key="appManager" style={{ fontSize: 20 }} />,
+          title: t('loggedHomePage.siderMenu.appManager'),
+          onActionClick: () => navigate('/app-manager'),
+          key: 'appManager',
+        },
+        {
+          icon: <MarketPlace key="marketplace" style={{ fontSize: 20 }} />,
+          title: t('loggedHomePage.siderMenu.marketplace'),
+          onActionClick: () => navigate('/marketplace'),
+          key: 'marketplace',
+        },
+      ].filter((item) => !isSelfHosted || !['appManager', 'marketplace'].includes(item?.key)),
+    [t, navigate, isSelfHosted],
+  );
+
+  // Secondary menu items (below divider)
+  const secondaryMenuItems = useMemo(
     () => [
       {
-        icon: <File key="home" style={{ fontSize: 20 }} />,
-        title: t('loggedHomePage.siderMenu.home'),
-        onActionClick: () => navigate('/'),
-        key: 'home',
-      },
-      {
-        icon: <Flow key="canvas" style={{ fontSize: 20 }} />,
-        title: t('loggedHomePage.siderMenu.canvas'),
-        onActionClick: () => navigate('/workflow-list'),
-        key: 'canvas',
-      },
-      {
-        icon: <Project key="appManager" style={{ fontSize: 20 }} />,
-        title: t('loggedHomePage.siderMenu.appManager'),
-        onActionClick: () => navigate('/app-manager'),
-        key: 'appManager',
-      },
-      {
-        icon: <MarketPlace key="marketplace" style={{ fontSize: 20 }} />,
-        title: t('loggedHomePage.siderMenu.marketplace'),
-        onActionClick: () => navigate('/marketplace'),
-        key: 'marketplace',
+        icon: <History key="runHistory" style={{ fontSize: 20 }} />,
+        title: t('loggedHomePage.siderMenu.runHistory'),
+        onActionClick: () => navigate('/run-history'),
+        key: 'runHistory',
       },
     ],
     [t, navigate],
@@ -521,17 +549,29 @@ const SiderLoggedIn = (props: { source: 'sider' | 'popover' }) => {
             ))}
 
             <Divider className="m-0 border-refly-Card-Border" />
+
+            {/* Secondary menu items (below divider) */}
+            {secondaryMenuItems.map((item, index) => (
+              <SiderSectionHeader
+                key={`secondary-${index}`}
+                icon={item.icon}
+                title={item.title}
+                onActionClick={item.onActionClick}
+                isActive={item.key === getActiveKey()}
+                collapsed={isCollapsed}
+              />
+            ))}
           </div>
 
           {/* Promotion entry - show above invitation */}
           <div className="flex flex-col gap-2">
-            {!isCollapsed && (
+            {/* {subscriptionEnabled && !isCollapsed && (
               <PromotionItem
                 collapsed={isCollapsed}
                 promotionUrl={`${window.location.origin}/activities`}
                 userType={userType}
               />
-            )}
+            )} */}
 
             {!!userProfile?.uid &&
               authConfig?.data?.some((item) => item.provider === 'invitation') && (
@@ -613,11 +653,22 @@ export const SiderLayout = (props: { source: 'sider' | 'popover' }) => {
 
   return (
     <>
-      <SettingModal visible={showSettingModal} setVisible={setShowSettingModal} />
-      <InvitationModal visible={showInvitationModal} setVisible={setShowInvitationModal} />
-      <StorageExceededModal />
-      <CreditInsufficientModal />
-      <CanvasTemplateModal />
+      {/* Lazy load Modal components, only load when needed */}
+      {showSettingModal && (
+        <Suspense fallback={null}>
+          <SettingModal visible={showSettingModal} setVisible={setShowSettingModal} />
+        </Suspense>
+      )}
+      {showInvitationModal && (
+        <Suspense fallback={null}>
+          <InvitationModal visible={showInvitationModal} setVisible={setShowInvitationModal} />
+        </Suspense>
+      )}
+      <Suspense fallback={null}>
+        <StorageExceededModal />
+        <CreditInsufficientModal />
+        <CanvasTemplateModal />
+      </Suspense>
 
       {isLogin ? <SiderLoggedIn source={source} /> : <SiderLoggedOut source={source} />}
     </>

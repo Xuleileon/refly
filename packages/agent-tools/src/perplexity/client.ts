@@ -27,14 +27,17 @@ export interface ChatCompletionRequest {
     search_recency_filter?: 'hour' | 'day' | 'week' | 'month' | 'year';
   };
   response_format?: {
-    type: 'text' | 'json_schema';
+    type: 'text' | 'json_schema' | 'regex';
     json_schema?: {
       schema: Record<string, any>;
+    };
+    regex?: {
+      regex: string;
     };
   };
 }
 
-export interface SearchResult {
+interface SearchResult {
   title?: string;
   url?: string;
   date?: string | null;
@@ -53,7 +56,7 @@ export interface SearchResponse {
   }>;
 }
 
-export interface ChatCompletionUsage {
+interface ChatCompletionUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
@@ -92,7 +95,7 @@ export interface ChatCompletionResponse {
   search_results?: SearchResult[];
 }
 
-export class PerplexityError extends Error {
+class PerplexityError extends Error {
   constructor(
     message: string,
     public status: number,
@@ -157,8 +160,3 @@ export class PerplexityClient {
     });
   }
 }
-
-// Export default instance creator
-export const createPerplexityClient = (config: PerplexityConfig): PerplexityClient => {
-  return new PerplexityClient(config);
-};

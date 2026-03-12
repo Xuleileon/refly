@@ -2,14 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import type { ActionStepMeta } from '@refly/openapi-schema';
 import type { Response } from 'express';
 import { randomUUID } from 'node:crypto';
+import { safeParseJSON } from '@refly/utils';
 import { writeSSEResponse } from '../../utils/response';
 import { PrismaService } from '../common/prisma.service';
 import { ActionStep, ToolCallResult } from '@prisma/client';
-export type ToolEventPayload = {
-  run_id?: string;
-  metadata?: { toolsetKey?: string; name?: string };
-  data?: { input?: unknown; output?: unknown; error?: unknown };
-};
+import { sanitizeToolOutput } from '../action/action.dto';
 
 // Tool call status
 export enum ToolCallStatus {
@@ -194,6 +191,21 @@ export class ToolCallService {
   }
 
   /**
+   * Fetch PTC tool calls by ptcCallId (the execute_code's callId)
+   * Used to retrieve all tool calls made from within a sandbox execution
+   */
+  async fetchPtcToolCalls(ptcCallId: string) {
+    return this.prisma.toolCallResult.findMany({
+      where: {
+        ptcCallId,
+        type: 'ptc',
+        deletedAt: null,
+      },
+      orderBy: { pk: 'asc' },
+    });
+  }
+
+  /**
    * Build consolidated tool call history entries grouped by step name for a given result.
    * Only final tool call results are returned to avoid duplicating streaming fragments.
    */
@@ -233,7 +245,11 @@ export class ToolCallService {
    * @param toolCalls - Array of tool calls with optional stepName
    * @returns Steps with attached tool calls and merged XML content
    */
-  attachToolCallsToSteps(steps: ActionStep[], toolCalls: ToolCallResult[]): Array<ActionStep> {
+  attachToolCallsToSteps(
+    steps: ActionStep[],
+    toolCalls: ToolCallResult[],
+    options?: { sanitizeForDisplay?: boolean },
+  ): Array<ActionStep> {
     if (!steps || steps.length === 0) {
       return [];
     }
@@ -265,6 +281,13 @@ export class ToolCallService {
           if (!call || typeof call !== 'object' || !call?.callId) {
             return null;
           }
+
+          // Parse output JSON string and optionally sanitize
+          const rawOutput = safeParseJSON(call.output || '{}') ?? {};
+          const output = options?.sanitizeForDisplay
+            ? sanitizeToolOutput(call.toolName, rawOutput)
+            : rawOutput;
+
           return this.generateToolUseXML({
             toolCallId: call.callId,
             includeResult: call?.status !== ToolCallStatus.EXECUTING,
@@ -280,7 +303,7 @@ export class ToolCallService {
               toolsetName: call.toolsetId,
             },
             input: call.input,
-            output: call.output,
+            output,
             startTs: call.createdAt.getTime(),
             updatedTs: call.updatedAt.getTime() ?? call.createdAt.getTime(),
           });

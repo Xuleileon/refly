@@ -16,7 +16,6 @@ import {
   ProviderItem,
   ResourceMeta,
   ResourceType,
-  Skill,
   SkillRuntimeConfig,
   SkillTemplateConfig,
   TokenUsageItem,
@@ -94,7 +93,6 @@ export type SkillNodeMeta = {
   query?: string;
   resultId?: string;
   version?: number;
-  selectedSkill?: Skill;
   selectedToolsets?: GenericToolset[];
   modelInfo?: ModelInfo | null;
   contextItems?: IContextItem[];
@@ -107,6 +105,8 @@ export type SkillNodeMeta = {
   originalWidth?: number;
   projectId?: string;
   structuredData?: Record<string, unknown>;
+  /** Task ID from workflow plan, used for incremental editing mapping */
+  taskId?: string;
 };
 
 export type MediaSkillNodeMeta = {
@@ -160,7 +160,6 @@ export type ResponseNodeMeta = {
   errors?: string[];
   errorType?: string;
   structuredData?: Record<string, unknown>;
-  selectedSkill?: Skill;
   selectedToolsets?: GenericToolset[];
   contextItems?: IContextItem[];
   tplConfig?: SkillTemplateConfig;

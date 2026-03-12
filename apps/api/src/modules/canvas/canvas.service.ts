@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, Optional, forwardRef } from '@nestjs/common';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import pLimit from 'p-limit';
 import { Queue } from 'bullmq';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -35,6 +36,7 @@ import {
   genResourceID,
   genCodeArtifactID,
   batchReplaceRegex,
+  genCanvasVersionId,
 } from '@refly/utils';
 import { DeleteKnowledgeEntityJobData } from '../knowledge/knowledge.dto';
 import { QUEUE_DELETE_KNOWLEDGE_ENTITY, QUEUE_POST_DELETE_CANVAS } from '../../utils/const';
@@ -54,6 +56,7 @@ import { CanvasSyncService } from '../canvas-sync/canvas-sync.service';
 import { initEmptyCanvasState, mirrorCanvasData } from '@refly/canvas-common';
 import { ToolService } from '../tool/tool.service';
 import { DriveService } from '../drive/drive.service';
+import { CanvasDeletedEvent } from './canvas.events';
 
 @Injectable()
 export class CanvasService {
@@ -81,10 +84,18 @@ export class CanvasService {
     @Optional()
     @InjectQueue(QUEUE_POST_DELETE_CANVAS)
     private postDeleteCanvasQueue?: Queue<DeleteCanvasJobData>,
+    private readonly eventEmitter?: EventEmitter2,
   ) {}
 
   async listCanvases(user: User, param: ListCanvasesData['query']): Promise<CanvasDetailModel[]> {
-    const { page = 1, pageSize = 10, order = 'updationDesc', keyword } = param;
+    const {
+      page = 1,
+      pageSize = 10,
+      order = 'updationDesc',
+      keyword,
+      scheduleStatus,
+      hasSchedule,
+    } = param as any;
 
     // Build orderBy based on order parameter
     let orderBy: Prisma.CanvasOrderByWithRelationInput = { updatedAt: 'desc' as const };
@@ -121,12 +132,50 @@ export class CanvasService {
       };
     }
 
-    const canvases = await this.prisma.canvas.findMany({
+    // Get all canvases first (we'll filter by schedule status after)
+    let canvases = await this.prisma.canvas.findMany({
       where,
       orderBy,
-      skip: (page - 1) * pageSize,
-      take: pageSize,
     });
+
+    // Get all schedules for these canvases
+    const canvasIds = canvases.map((canvas) => canvas.canvasId);
+    const schedules = await this.prisma.workflowSchedule.findMany({
+      where: {
+        canvasId: { in: canvasIds },
+        deletedAt: null,
+      },
+    });
+
+    // Create schedule map
+    const scheduleMap = new Map<string, (typeof schedules)[0]>();
+    for (const schedule of schedules) {
+      scheduleMap.set(schedule.canvasId, schedule);
+    }
+
+    // Filter by schedule status if provided
+    if (scheduleStatus === 'active') {
+      canvases = canvases.filter((canvas) => {
+        const schedule = scheduleMap.get(canvas.canvasId);
+        return schedule?.isEnabled;
+      });
+    } else if (scheduleStatus === 'inactive') {
+      canvases = canvases.filter((canvas) => {
+        const schedule = scheduleMap.get(canvas.canvasId);
+        return !schedule || !schedule.isEnabled;
+      });
+    }
+
+    // Filter by hasSchedule if provided (canvases that have any schedule)
+    if (hasSchedule) {
+      canvases = canvases.filter((canvas) => {
+        return scheduleMap.has(canvas.canvasId);
+      });
+    }
+
+    // Apply pagination after filtering
+    const paginatedCanvases = canvases.slice((page - 1) * pageSize, page * pageSize);
+    const paginatedCanvasIds = paginatedCanvases.map((canvas) => canvas.canvasId);
 
     // Get owner information (all canvases belong to the same user)
     const owner = await this.prisma.user.findUnique({
@@ -140,10 +189,9 @@ export class CanvasService {
     });
 
     // Get share records for all canvases in one query
-    const canvasIds = canvases.map((canvas) => canvas.canvasId);
     const shareRecords = await this.prisma.shareRecord.findMany({
       where: {
-        entityId: { in: canvasIds },
+        entityId: { in: paginatedCanvasIds },
         entityType: 'canvas',
         deletedAt: null,
       },
@@ -160,7 +208,7 @@ export class CanvasService {
 
     const workflowApps = await this.prisma.workflowApp.findMany({
       where: {
-        canvasId: { in: canvasIds },
+        canvasId: { in: paginatedCanvasIds },
         deletedAt: null,
       },
       orderBy: { createdAt: 'desc' },
@@ -173,15 +221,22 @@ export class CanvasService {
       }
     }
 
-    return canvases.map((canvas) => ({
-      ...canvas,
-      owner,
-      shareRecord: shareRecordMap.get(canvas.canvasId) || null,
-      workflowApp: workflowAppMap.get(canvas.canvasId) || null,
-      minimapUrl: canvas.minimapStorageKey
-        ? this.miscService.generateFileURL({ storageKey: canvas.minimapStorageKey })
-        : undefined,
-    }));
+    return paginatedCanvases.map((canvas) => {
+      const schedule = scheduleMap.get(canvas.canvasId);
+      // Remove pk field (BigInt) from schedule to avoid serialization issues
+      const scheduleWithoutPk = schedule ? (({ pk, ...rest }) => rest)(schedule) : undefined;
+
+      return {
+        ...canvas,
+        owner,
+        shareRecord: shareRecordMap.get(canvas.canvasId) || null,
+        workflowApp: workflowAppMap.get(canvas.canvasId) || null,
+        schedule: scheduleWithoutPk,
+        minimapUrl: canvas.minimapStorageKey
+          ? this.miscService.generateFileURL({ storageKey: canvas.minimapStorageKey })
+          : undefined,
+      };
+    });
   }
 
   async getCanvasDetail(user: User, canvasId: string) {
@@ -247,12 +302,82 @@ export class CanvasService {
     };
   }
 
+  /**
+   * Create a canvas snapshot with files/resources for export.
+   * Ownership is enforced via checkOwnership when reading canvas data.
+   */
+  async createSnapshotFromCanvas(user: { uid: string }, canvasId: string): Promise<RawCanvasData> {
+    const rawData = await this.getCanvasRawData(user as User, canvasId, {
+      checkOwnership: true,
+    });
+
+    const driveFiles = await this.prisma.driveFile.findMany({
+      where: {
+        uid: user.uid,
+        canvasId,
+        scope: 'present',
+        deletedAt: null,
+      },
+    });
+
+    const files = driveFiles.map((file) => ({
+      fileId: file.fileId,
+      canvasId: file.canvasId,
+      name: file.name,
+      type: file.type,
+      category: file.category,
+      size: Number(file.size),
+      source: file.source,
+      scope: file.scope,
+      summary: file.summary ?? undefined,
+      variableId: file.variableId ?? undefined,
+      resultId: file.resultId ?? undefined,
+      resultVersion: file.resultVersion ?? undefined,
+      storageKey: file.storageKey ?? undefined,
+      createdAt: file.createdAt.toJSON(),
+      updatedAt: file.updatedAt.toJSON(),
+    }));
+
+    const resources = await this.prisma.resource.findMany({
+      where: {
+        uid: user.uid,
+        canvasId,
+        deletedAt: null,
+      },
+      select: {
+        resourceId: true,
+        title: true,
+        resourceType: true,
+        storageKey: true,
+        storageSize: true,
+        contentPreview: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+    });
+
+    return {
+      title: rawData.title,
+      canvasId,
+      nodes: rawData.nodes ?? [],
+      edges: rawData.edges ?? [],
+      variables: rawData.variables ?? [],
+      files,
+      resources: resources.map((resource) => ({
+        ...resource,
+        storageSize: Number(resource.storageSize || 0),
+        createdAt: resource.createdAt.toJSON(),
+        updatedAt: resource.updatedAt.toJSON(),
+      })),
+    } as RawCanvasData;
+  }
+
   async duplicateCanvas(
     user: User,
     param: DuplicateCanvasRequest,
     options?: { checkOwnership?: boolean },
   ) {
-    const { title, canvasId, projectId, duplicateEntities = true } = param;
+    const { title, canvasId, duplicateEntities = true } = param;
 
     const canvas = await this.prisma.canvas.findFirst({
       where: { canvasId, deletedAt: null, uid: options?.checkOwnership ? user.uid : undefined },
@@ -315,7 +440,6 @@ export class CanvasService {
         canvasId: newCanvasId,
         title: newTitle,
         status: 'creating', // Temporary status
-        projectId,
         version: '0', // Temporary version
         workflow: canvas.workflow,
       },
@@ -581,7 +705,6 @@ export class CanvasService {
           uid: user.uid,
           canvasId,
           title: param.title,
-          projectId: param.projectId,
           version: state.version,
           workflow: JSON.stringify({ variables: param.variables }),
           visibility: param.visibility ?? true,
@@ -615,15 +738,32 @@ export class CanvasService {
       createdAt: canvas.createdAt.toJSON(),
       updatedAt: canvas.updatedAt.toJSON(),
       uid: canvas.uid,
-      projectId: canvas.projectId,
     });
 
     return updatedCanvas;
   }
 
-  async createCanvas(user: User, param: UpsertCanvasRequest) {
+  async createCanvas(
+    user: User,
+    param: UpsertCanvasRequest,
+    options?: { skipDefaultNodes?: boolean },
+  ) {
     // Use the canvasId from param if provided, otherwise generate a new one
     param.canvasId ||= genCanvasID();
+
+    // Skip default nodes for workflow execution canvases
+    if (options?.skipDefaultNodes) {
+      const state: CanvasState = {
+        version: genCanvasVersionId(),
+        nodes: [],
+        edges: [],
+        transactions: [],
+        history: [],
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+      return this.createCanvasWithState(user, param, state);
+    }
 
     // Get default agent model for the initial skillResponse node
     const defaultAgentItem = await this.providerService.findDefaultProviderItem(user, 'agent');
@@ -631,12 +771,18 @@ export class CanvasService {
       ? providerItem2ModelInfo(defaultAgentItem as any)
       : undefined;
 
-    const state = initEmptyCanvasState({ defaultModelInfo });
+    // Get user locale
+    const dbUser = await this.prisma.user.findUnique({
+      where: { uid: user.uid },
+      select: { uiLocale: true },
+    });
+
+    const state = initEmptyCanvasState({ defaultModelInfo, locale: dbUser?.uiLocale ?? undefined });
     return this.createCanvasWithState(user, param, state);
   }
 
   async updateCanvas(user: User, param: UpsertCanvasRequest) {
-    const { canvasId, title, minimapStorageKey, projectId } = param;
+    const { canvasId, title, minimapStorageKey } = param;
 
     const canvas = await this.prisma.canvas.findUnique({
       where: { canvasId, uid: user.uid, deletedAt: null },
@@ -650,13 +796,6 @@ export class CanvasService {
 
     if (title !== undefined) {
       updates.title = title;
-    }
-    if (projectId !== undefined) {
-      if (projectId) {
-        updates.project = { connect: { projectId } };
-      } else {
-        updates.project = { disconnect: true };
-      }
     }
     if (minimapStorageKey !== undefined) {
       const minimapFile = await this.miscService.findFileAndBindEntity(minimapStorageKey, {
@@ -692,7 +831,6 @@ export class CanvasService {
       title: updatedCanvas.title,
       updatedAt: updatedCanvas.updatedAt.toJSON(),
       uid: updatedCanvas.uid,
-      projectId: updatedCanvas.projectId,
     });
 
     return updatedCanvas;
@@ -757,6 +895,11 @@ export class CanvasService {
       this.logger.warn(`Canvas ${canvasId} not found or not deleted`);
       return;
     }
+
+    // ========== Emit canvas.deleted event for other modules to react ==========
+    // Schedule cleanup is handled by ScheduleEventListener.handleCanvasDeleted
+    this.eventEmitter.emit('canvas.deleted', new CanvasDeletedEvent(canvasId, uid));
+    this.logger.log(`Emitted canvas.deleted event for canvas ${canvasId}`);
 
     const cleanups: Promise<any>[] = [this.fts.deleteDocument({ uid }, 'canvas', canvas.canvasId)];
 
@@ -1332,13 +1475,66 @@ export class CanvasService {
         driveFile = await this.driveService.duplicateDriveFile(user, driveFile, canvasId);
       }
 
+      // Map DriveFile category to VariableResourceType (handle 'others' -> 'document')
+      const fileType =
+        resource.fileType ||
+        (driveFile.category === 'others' ? 'document' : driveFile.category) ||
+        'document';
+
       return {
         ...value,
         resource: {
           ...resource,
+          // Fill in missing fields from DriveFile for CLI compatibility
+          // When CLI passes only fileId (e.g., --input '{"fileVar": "df-xxx"}'),
+          // we need to populate name, storageKey, fileType from the DriveFile record
+          name: resource.name || driveFile.name,
+          storageKey: resource.storageKey || driveFile.storageKey,
+          fileType,
           fileId: driveFile.fileId,
         },
       };
+    }
+
+    // If only storageKey exists (no fileId), create a new DriveFile from the storageKey
+    if (resource.storageKey) {
+      let resolvedName = resource.name;
+      let resolvedFileType = resource.fileType;
+      if (resource.storageKey.startsWith('openapi/')) {
+        const staticFile = await this.prisma.staticFile.findFirst({
+          where: { storageKey: resource.storageKey, deletedAt: null },
+        });
+        if (staticFile?.originalName && !resolvedName) {
+          resolvedName = staticFile.originalName;
+        }
+        if (staticFile?.contentType && !resolvedFileType) {
+          resolvedFileType = mapContentTypeToFileType(staticFile.contentType);
+        }
+      }
+
+      try {
+        const driveFile = await this.driveService.createDriveFile(user, {
+          canvasId,
+          name: resolvedName || 'uploaded_file',
+          storageKey: resource.storageKey,
+          source: 'variable',
+        });
+
+        return {
+          ...value,
+          resource: {
+            ...resource,
+            fileId: driveFile.fileId,
+            name: resolvedName ?? resource.name,
+            fileType: resolvedFileType ?? resource.fileType,
+          },
+        };
+      } catch (error) {
+        this.logger.warn(
+          `Failed to create DriveFile from storageKey ${resource.storageKey}: ${error?.message}`,
+        );
+        return value;
+      }
     }
 
     return value;
@@ -1488,3 +1684,13 @@ export class CanvasService {
     return workflowObj.variables;
   }
 }
+
+const mapContentTypeToFileType = (
+  contentType?: string,
+): 'document' | 'image' | 'video' | 'audio' => {
+  if (!contentType) return 'document';
+  if (contentType.startsWith('image/')) return 'image';
+  if (contentType.startsWith('video/')) return 'video';
+  if (contentType.startsWith('audio/')) return 'audio';
+  return 'document';
+};

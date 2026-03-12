@@ -18,12 +18,12 @@ import {
   Icon,
   Artifact,
   ActionStepMeta,
-  Project,
   Provider,
   LLMModelConfig,
   MediaGenerationModelConfig,
   AgentMode,
   GenericToolset,
+  NodeEditContext,
 } from '@refly/openapi-schema';
 import { EventEmitter } from 'node:stream';
 import { preprocess, PreprocessResult } from './scheduler/utils/preprocess';
@@ -235,6 +235,27 @@ export interface BaseToolParams extends ToolParams {
   engine: SkillEngine;
 }
 
+export interface PtcContext {
+  toolsets: {
+    id: string;
+    name: string;
+    key: string;
+  }[];
+  sdk: {
+    pathPrefix: string;
+    codes: {
+      toolsetKey: string;
+      path: string;
+      content: string;
+    }[];
+    docs: {
+      toolsetKey: string;
+      path: string;
+      content: string;
+    }[];
+  };
+}
+
 export interface BaseSkillState extends SkillInput {
   messages: BaseMessage[];
 }
@@ -288,8 +309,13 @@ export interface SkillRunnableConfig extends RunnableConfig {
     resultId?: string;
     version?: number;
     canvasId?: string;
+    copilotSessionId?: string;
     locale?: string;
     uiLocale?: string;
+    builtInTools?: StructuredToolInterface[];
+    nonBuiltInTools?: StructuredToolInterface[];
+    builtInToolsets?: GenericToolset[];
+    nonBuiltInToolsets?: GenericToolset[];
     modelConfigMap?: {
       chat?: LLMModelConfig;
       agent?: LLMModelConfig;
@@ -301,7 +327,6 @@ export interface SkillRunnableConfig extends RunnableConfig {
     };
     mode?: AgentMode;
     provider?: Provider;
-    project?: Project;
     currentSkill?: SkillMeta;
     currentStep?: ActionStepMeta;
     chatHistory?: BaseMessage[];
@@ -311,6 +336,11 @@ export interface SkillRunnableConfig extends RunnableConfig {
     selectedTools?: StructuredToolInterface[];
     installedToolsets?: GenericToolset[];
     preprocessResult?: PreprocessResult;
+    ptcEnabled?: boolean;
+    ptcContext?: PtcContext;
+    nodeEditContext?: NodeEditContext;
+    ptcSequential?: boolean;
+    webSearchEnabled?: boolean;
   };
   metadata?: SkillRunnableMeta;
 }

@@ -1,13 +1,14 @@
 import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
-import { SubscriptionPlanType, Voucher } from '@refly/openapi-schema';
+import { SubscriptionPlanType, Voucher, VoucherTriggerResult } from '@refly/openapi-schema';
 
 interface SubscriptionState {
   // state
   planType: SubscriptionPlanType;
   userType: string;
   subscribeModalVisible: boolean;
+  subscribeModalSource: string; // Track where the subscribe modal was triggered from (canvas, template_detail, pricing_page, etc.)
   storageExceededModalVisible: boolean;
   creditInsufficientModalVisible: boolean;
   creditInsufficientMembershipLevel: string;
@@ -18,6 +19,10 @@ interface SubscriptionState {
   availableVoucher: Voucher | null; // Best available voucher for the user
   voucherLoading: boolean;
 
+  // Earned voucher popup state (for showing popup after earning via workflow run or publish)
+  earnedVoucherPopupVisible: boolean;
+  earnedVoucherResult: VoucherTriggerResult | null;
+
   // Claimed voucher popup state (for showing popup after claiming via invite)
   claimedVoucherPopupVisible: boolean;
   claimedVoucher: Voucher | null;
@@ -26,7 +31,7 @@ interface SubscriptionState {
   // method
   setPlanType: (val: SubscriptionPlanType) => void;
   setUserType: (val: string) => void;
-  setSubscribeModalVisible: (val: boolean) => void;
+  setSubscribeModalVisible: (val: boolean, source?: string) => void;
   setStorageExceededModalVisible: (val: boolean) => void;
   setCreditInsufficientModalVisible: (
     val: boolean,
@@ -36,6 +41,8 @@ interface SubscriptionState {
   setOpenedFromSettings: (val: boolean) => void; // Method to set the openedFromSettings state
   setAvailableVoucher: (voucher: Voucher | null) => void;
   setVoucherLoading: (loading: boolean) => void;
+  showEarnedVoucherPopup: (voucherResult: VoucherTriggerResult) => void;
+  hideEarnedVoucherPopup: () => void;
   showClaimedVoucherPopup: (voucher: Voucher, inviterName?: string) => void;
   hideClaimedVoucherPopup: () => void;
 }
@@ -45,6 +52,7 @@ export const useSubscriptionStore = create<SubscriptionState>()(
     planType: 'free',
     userType: '',
     subscribeModalVisible: false,
+    subscribeModalSource: '',
     storageExceededModalVisible: false,
     creditInsufficientModalVisible: false,
     creditInsufficientMembershipLevel: '',
@@ -52,13 +60,22 @@ export const useSubscriptionStore = create<SubscriptionState>()(
     openedFromSettings: false,
     availableVoucher: null,
     voucherLoading: false,
+    earnedVoucherPopupVisible: false,
+    earnedVoucherResult: null,
     claimedVoucherPopupVisible: false,
     claimedVoucher: null,
     claimedVoucherInviterName: null,
 
     setPlanType: (val: SubscriptionPlanType) => set({ planType: val }),
     setUserType: (val: string) => set({ userType: val }),
-    setSubscribeModalVisible: (val: boolean) => set({ subscribeModalVisible: val }),
+    setSubscribeModalVisible: (val: boolean, source?: string) =>
+      set((state) => ({
+        subscribeModalVisible: val,
+        // Only update source when opening the modal with a source, preserve when closing
+        subscribeModalSource: val
+          ? source || state.subscribeModalSource
+          : state.subscribeModalSource,
+      })),
     setStorageExceededModalVisible: (val: boolean) => set({ storageExceededModalVisible: val }),
     setCreditInsufficientModalVisible: (
       val: boolean,
@@ -83,6 +100,16 @@ export const useSubscriptionStore = create<SubscriptionState>()(
     setOpenedFromSettings: (val: boolean) => set({ openedFromSettings: val }),
     setAvailableVoucher: (voucher: Voucher | null) => set({ availableVoucher: voucher }),
     setVoucherLoading: (loading: boolean) => set({ voucherLoading: loading }),
+    showEarnedVoucherPopup: (voucherResult: VoucherTriggerResult) =>
+      set({
+        earnedVoucherPopupVisible: true,
+        earnedVoucherResult: voucherResult,
+      }),
+    hideEarnedVoucherPopup: () =>
+      set({
+        earnedVoucherPopupVisible: false,
+        earnedVoucherResult: null,
+      }),
     showClaimedVoucherPopup: (voucher: Voucher, inviterName?: string) =>
       set({
         claimedVoucherPopupVisible: true,

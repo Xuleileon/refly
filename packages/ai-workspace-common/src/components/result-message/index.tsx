@@ -27,7 +27,7 @@ interface MessageListProps {
 /**
  * Render AI message with markdown content
  */
-export const AIMessageCard = memo(({ message, resultId, stepStatus }: AIMessageCardProps) => {
+const AIMessageCard = memo(({ message, resultId, stepStatus }: AIMessageCardProps) => {
   const content = message.content ?? '';
   const reasoningContent = message.reasoningContent ?? '';
   const hasReasoningContent = Boolean(reasoningContent?.trim());
@@ -62,7 +62,7 @@ AIMessageCard.displayName = 'AIMessageCard';
 /**
  * Render tool message using ToolCall component
  */
-export const ToolMessageCard = memo(({ message }: ToolMessageCardProps) => {
+const ToolMessageCard = memo(({ message }: ToolMessageCardProps) => {
   const toolCallMeta = message.toolCallMeta;
   const toolCallResult = message.toolCallResult;
 
@@ -83,13 +83,14 @@ export const ToolMessageCard = memo(({ message }: ToolMessageCardProps) => {
       'data-tool-arguments': JSON.stringify(toolCallResult?.input),
       'data-tool-result': JSON.stringify(toolCallResult?.output),
       'data-tool-error': toolCallMeta?.error,
+      'data-tool-is-ptc': message.isPtc ? 'true' : undefined,
     }),
     [toolCallMeta, message, toolCallResult],
   );
 
   return (
     <div
-      className="my-2"
+      className="my-1"
       style={{
         contentVisibility: 'auto',
         containIntrinsicSize: '0 300px',
@@ -131,7 +132,7 @@ export const MessageList = memo(({ result, stepStatus, handleRetry }: MessageLis
   }
 
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col my-2">
       {messages.map((message) => {
         if (message.type === 'ai') {
           return (

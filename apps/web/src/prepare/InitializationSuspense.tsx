@@ -1,6 +1,12 @@
 import { setupI18n, setupSentry } from '@refly/web-core';
 import { useEffect, useState } from 'react';
-import { LightLoading, ReflyConfigProvider, useConfigProviderStore } from '@refly/ui-kit';
+import {
+  LightLoading,
+  ReflyConfigProvider,
+  cssinjsCache,
+  useConfigProviderStore,
+} from '@refly/ui-kit';
+import { StyleProvider } from '@ant-design/cssinjs';
 import { ConfigProvider, theme } from 'antd';
 import { useThemeStoreShallow } from '@refly/stores';
 import { setRuntime } from '@refly/utils/env';
@@ -11,6 +17,7 @@ export interface InitializationSuspenseProps {
 }
 
 export function InitializationSuspense({ children }: InitializationSuspenseProps) {
+  // Initialization state
   const [isInitialized, setIsInitialized] = useState(false);
   const updateTheme = useConfigProviderStore((state) => state.updateTheme);
 
@@ -20,12 +27,28 @@ export function InitializationSuspense({ children }: InitializationSuspenseProps
   }));
 
   const init = async () => {
+    // Initialize runtime and theme regardless of prerendering state
     setRuntime('web');
     initTheme();
 
-    // support multiple initialization
-    await Promise.all([setupI18n(), setupSentry(), setupStatsig()]);
-    setIsInitialized(true);
+    // Initialization for normal load or prerender
+    try {
+      await setupI18n();
+      setIsInitialized(true);
+
+      // Hide loading - safe to call during prerendering
+      (window as any).__REFLY_HIDE_LOADING__?.();
+    } catch (error) {
+      console.error('Failed to initialize i18n:', error);
+      // Allow continuation even on failure to avoid permanent loading state
+      setIsInitialized(true);
+    }
+
+    // Non-blocking initialization - can run during prerendering
+    // These services should handle prerendering internally if needed
+    Promise.all([setupSentry(), setupStatsig()]).catch((e) => {
+      console.error('Failed to initialize metrics:', e);
+    });
   };
 
   useEffect(() => {
@@ -53,7 +76,11 @@ export function InitializationSuspense({ children }: InitializationSuspenseProps
     updateTheme(themeConfig);
 
     ConfigProvider.config({
-      holderRender: (children) => <ConfigProvider theme={themeConfig}>{children}</ConfigProvider>,
+      holderRender: (children) => (
+        <StyleProvider cache={cssinjsCache}>
+          <ConfigProvider theme={themeConfig}>{children}</ConfigProvider>
+        </StyleProvider>
+      ),
     });
   }, [isDarkMode]);
 

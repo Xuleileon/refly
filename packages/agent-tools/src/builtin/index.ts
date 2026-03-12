@@ -1,6 +1,13 @@
 import { z } from 'zod/v3';
 import { AgentBaseTool, AgentBaseToolset } from '../base';
 import { BuiltinExecuteCode } from './sandbox';
+import {
+  extractFileId,
+  extractAllFileIds,
+  hasFileIds,
+  replaceAllMarkdownFileIds,
+  replaceAllHtmlFileIds,
+} from '@refly/utils';
 
 import type { RunnableConfig } from '@langchain/core/runnables';
 import type { ToolsetDefinition, User } from '@refly/openapi-schema';
@@ -39,6 +46,22 @@ export const BuiltinToolsetDefinition: ToolsetDefinition = {
       descriptionDict: {
         en: 'List all files in the current canvas.',
         'zh-CN': '列出当前画布中的所有文件。',
+      },
+      modelOnly: true,
+    },
+    {
+      name: 'read_agent_result',
+      descriptionDict: {
+        en: 'Read full content of a previous agent result.',
+        'zh-CN': '读取前置节点的完整执行结果。',
+      },
+      modelOnly: true,
+    },
+    {
+      name: 'read_tool_result',
+      descriptionDict: {
+        en: 'Read detailed input/output of a specific tool call.',
+        'zh-CN': '读取特定工具调用的详细输入输出。',
       },
       modelOnly: true,
     },
@@ -199,6 +222,30 @@ export const BuiltinListFilesDefinition: ToolsetDefinition = {
   },
 };
 
+export const BuiltinGenerateWorkflowPlanDefinition: ToolsetDefinition = {
+  key: 'generate_workflow_plan',
+  labelDict: {
+    en: 'Generate Workflow Plan',
+    'zh-CN': '生成工作流计划',
+  },
+  descriptionDict: {
+    en: 'Generate a new workflow plan based on tasks and variables.',
+    'zh-CN': '根据任务和变量生成新的工作流计划。',
+  },
+};
+
+export const BuiltinPatchWorkflowPlanDefinition: ToolsetDefinition = {
+  key: 'patch_workflow_plan',
+  labelDict: {
+    en: 'Patch Workflow Plan',
+    'zh-CN': '修补工作流计划',
+  },
+  descriptionDict: {
+    en: 'Patch an existing workflow plan with changes.',
+    'zh-CN': '通过更改修补现有工作流计划。',
+  },
+};
+
 export class BuiltinLibrarySearch extends AgentBaseTool<BuiltinToolParams> {
   name = 'library_search';
   toolsetKey = 'library_search';
@@ -314,22 +361,17 @@ export class BuiltinGenerateDoc extends AgentBaseTool<BuiltinToolParams> {
   schema = z.object({
     title: z.string().describe('Title of the document to generate'),
     content: z.string().describe(
-      `Document content. When referencing files from context, replace the filename with its fileId using these formats:
+      `Document content in Markdown format.
 
-Supported fileId placeholder formats:
-- \`file-content://df-<fileId>\` - Direct content URL (for embedded media)
-- \`file://df-<fileId>\` - Share page URL (for clickable links)
-- \`fileId://df-<fileId>\` - Share page URL
-- \`@file:df-<fileId>\` - Share page URL
-- \`files/df-<fileId>\` - Share page URL
-- \`df-<fileId>\` - Direct content URL (standalone)
+## File Embedding (CRITICAL: Use ONLY fileIds from context)
+When embedding files, you MUST use the EXACT fileId provided in context (e.g., from list_files or file metadata).
+⚠️ NEVER invent or guess file IDs. File IDs follow the format \`df-<alphanumeric>\` (e.g., df-abc123xyz).
 
-Usage by document type:
-- Markdown: \`![alt text](df-<fileId>)\` or \`![alt text](file-content://df-<fileId>)\`
-- HTML: \`<img src="file-content://df-<fileId>">\` or \`<a href="file://df-<fileId>">\`
-- Plain text/other: Use direct fileId \`df-<fileId>\` which converts to content URL
+Placeholder formats:
+- \`![alt](file-content://df-<fileId>)\` - For images/media (direct file URL)
+- \`[text](file://df-<fileId>)\` - For links (share page URL)
 
-IMPORTANT: Always use the fileId (format: df-xxx) from context, NOT the original filename.`,
+If no files are in context, do NOT use file placeholders.`,
     ),
   });
   description =
@@ -349,6 +391,7 @@ IMPORTANT: Always use the fileId (format: df-xxx) from context, NOT the original
   ): Promise<ToolCallResult> {
     try {
       const { reflyService, user } = this.params;
+      const canvasId = config.configurable?.canvasId;
 
       // Replace file placeholders with HTTP URLs before writing
       const processedContent = await this.replaceFilePlaceholders(input.content);
@@ -357,7 +400,7 @@ IMPORTANT: Always use the fileId (format: df-xxx) from context, NOT the original
         name: input.title,
         content: processedContent,
         type: 'text/plain',
-        canvasId: config.configurable?.canvasId,
+        canvasId,
         resultId: config.configurable?.resultId,
         resultVersion: config.configurable?.version,
       });
@@ -381,109 +424,60 @@ IMPORTANT: Always use the fileId (format: df-xxx) from context, NOT the original
 
   /**
    * Replace file placeholders in content with HTTP URLs.
-   * Supports multiple formats:
-   * - `file-content://df-xxx` → Direct file content URL (for images, etc.)
-   * - `file://df-xxx` → Share page URL (for links/previews)
-   * - `fileId://df-xxx` → Share page URL
-   * - `@file:df-xxx` → Share page URL
-   * - `files/df-xxx` → Share page URL
-   * - `df-xxx` (standalone) → Direct file content URL
+   * Supported formats:
+   * - `![alt](file-content://df-xxx)` → Direct file content URL (for images)
+   * - `[text](file://df-xxx)` → Share page URL (for links)
    */
   private async replaceFilePlaceholders(content: string): Promise<string> {
     if (!content) {
       return content;
     }
 
-    try {
-      // Pattern to find all fileIds in various formats
-      // Uses lookbehind to ensure 'df-' is not preceded by alphanumeric (avoid matching 'pdf-xxx')
-      const fileIdPattern = /(?<![a-z0-9])(df-[a-z0-9]+)\b/gi;
-      const allMatches = Array.from(content.matchAll(fileIdPattern));
-
-      if (allMatches.length === 0) {
-        return content;
-      }
-
-      // Collect unique file IDs
-      const uniqueFileIds = [...new Set(allMatches.map(([, fileId]) => fileId))];
-
-      const { reflyService, user } = this.params;
-
-      // Fetch all drive files and generate URLs
-      const urlResults = await Promise.all(
-        uniqueFileIds.map(async (fileId) => {
-          try {
-            const { url, contentUrl } = await reflyService.createShareForDriveFile(user, fileId);
-            return { fileId, shareUrl: url, contentUrl };
-          } catch (error) {
-            // If file not found or URL generation fails, log and keep original placeholder
-            console.error(
-              `[BuiltinGenerateDoc] Failed to create share URL for fileId ${fileId}:`,
-              error,
-            );
-            return { fileId, shareUrl: null, contentUrl: null };
-          }
-        }),
-      );
-
-      // Build URL maps
-      const shareUrlMap = new Map<string, string>();
-      const contentUrlMap = new Map<string, string>();
-
-      for (const { fileId, shareUrl, contentUrl } of urlResults) {
-        if (shareUrl) {
-          shareUrlMap.set(fileId, shareUrl);
-        }
-        if (contentUrl) {
-          contentUrlMap.set(fileId, contentUrl);
-        }
-      }
-
-      let result = content;
-
-      // Replace file-content://df-xxx with direct content URLs
-      result = result.replace(
-        /file-content:\/\/(df-[a-z0-9]+)/gi,
-        (match, fileId: string) => contentUrlMap.get(fileId) ?? match,
-      );
-
-      // Replace file://df-xxx with share page URLs (but not file-content://)
-      result = result.replace(
-        /(?<!-)file:\/\/(df-[a-z0-9]+)/gi,
-        (match, fileId: string) => shareUrlMap.get(fileId) ?? match,
-      );
-
-      // Replace fileId://df-xxx with share page URLs
-      result = result.replace(
-        /fileId:\/\/(df-[a-z0-9]+)/gi,
-        (match, fileId: string) => shareUrlMap.get(fileId) ?? match,
-      );
-
-      // Replace @file:df-xxx with share page URLs
-      result = result.replace(
-        /@file:(df-[a-z0-9]+)/gi,
-        (match, fileId: string) => shareUrlMap.get(fileId) ?? match,
-      );
-
-      // Replace files/df-xxx with share page URLs
-      result = result.replace(
-        /files\/(df-[a-z0-9]+)/gi,
-        (match, fileId: string) => shareUrlMap.get(fileId) ?? match,
-      );
-
-      // Replace standalone df-xxx (not already processed) with content URLs
-      // This handles cases like markdown images: ![image](df-xxx)
-      result = result.replace(/(?<![a-z0-9:/])(df-[a-z0-9]+)\b/gi, (match, fileId: string) => {
-        // Only replace if we have a URL for this fileId
-        return contentUrlMap.get(fileId) ?? match;
-      });
-
-      return result;
-    } catch (error) {
-      // Log error and return original content to avoid breaking document generation
-      console.error('[BuiltinGenerateDoc] Error replacing file placeholders:', error);
+    // Use shared utility to check for and extract all file IDs
+    if (!hasFileIds(content)) {
       return content;
     }
+
+    // Extract all unique file IDs using shared utility
+    const uniqueFileIds = extractAllFileIds(content);
+
+    if (uniqueFileIds.length === 0) {
+      return content;
+    }
+
+    const { reflyService, user } = this.params;
+
+    // Get both URL types for each file
+    const urlResults = await Promise.all(
+      uniqueFileIds.map(async (fileId) => {
+        try {
+          const { url, contentUrl } = await reflyService.createShareForDriveFile(user, fileId);
+          return { fileId, shareUrl: url, contentUrl };
+        } catch (error) {
+          console.error(
+            `[BuiltinGenerateDoc] Failed to create share URL for fileId ${fileId}:`,
+            error,
+          );
+          return { fileId, shareUrl: null, contentUrl: null };
+        }
+      }),
+    );
+
+    // Build URL maps
+    const shareUrlMap = new Map<string, string>();
+    const contentUrlMap = new Map<string, string>();
+
+    for (const { fileId, shareUrl, contentUrl } of urlResults) {
+      if (shareUrl) {
+        shareUrlMap.set(fileId, shareUrl);
+      }
+      if (contentUrl) {
+        contentUrlMap.set(fileId, contentUrl);
+      }
+    }
+
+    // Use shared utility to replace all file ID patterns in markdown content
+    return replaceAllMarkdownFileIds(content, contentUrlMap, shareUrlMap);
   }
 }
 
@@ -495,7 +489,19 @@ export class BuiltinGenerateCodeArtifact extends AgentBaseTool<BuiltinToolParams
     filename: z
       .string()
       .describe('Name of the file to generate, must include extension (.md, .html, .svg, etc.)'),
-    content: z.string().describe('File content (markdown, HTML, SVG markup, etc.)'),
+    content: z.string().describe(
+      `File content (markdown, HTML, SVG markup, etc.).
+
+## File Embedding (CRITICAL: Use ONLY fileIds from context)
+When embedding files, you MUST use the EXACT fileId provided in context (e.g., from list_files or file metadata).
+⚠️ NEVER invent or guess file IDs. File IDs follow the format \`df-<alphanumeric>\` (e.g., df-abc123xyz).
+
+Placeholder formats:
+- \`![alt](file-content://df-<fileId>)\` - For images/media (direct file URL)
+- \`[text](file://df-<fileId>)\` - For links (share page URL)
+
+If no files are in context, do NOT use file placeholders.`,
+    ),
   });
 
   description = `Generate renderable content files that display as rich previews in the UI.
@@ -514,10 +520,8 @@ export class BuiltinGenerateCodeArtifact extends AgentBaseTool<BuiltinToolParams
 - ❌ Executable code files (.py, .js, .ts) — use execute_code tool instead
 - ❌ Data files (CSV, JSON, Excel) — use execute_code to generate these
 
-## Important
-- Always use **full URLs** for embedded images/links (e.g., http://localhost:5173/v1/drive/file/content/df-xxx)
-- SVG \`<image>\` tag requires **explicit numeric width and height** (e.g., \`width="300" height="200"\`). Do NOT use \`auto\` — it's invalid in SVG
-- Markdown supports standard image syntax: ![alt](full-url)`;
+## Note
+- SVG \`<image>\` tag requires explicit numeric width and height (e.g., \`width="300" height="200"\`)`;
 
   protected params: BuiltinToolParams;
 
@@ -533,11 +537,16 @@ export class BuiltinGenerateCodeArtifact extends AgentBaseTool<BuiltinToolParams
   ): Promise<ToolCallResult> {
     try {
       const { reflyService, user } = this.params;
+      const canvasId = config.configurable?.canvasId;
+
+      // Replace file placeholders with HTTP URLs before writing
+      const processedContent = await this.replaceFilePlaceholders(input.content, input.filename);
+
       const file = await reflyService.writeFile(user, {
         name: input.filename,
         type: 'text/plain',
-        content: input.content,
-        canvasId: config.configurable?.canvasId,
+        content: processedContent,
+        canvasId,
         resultId: config.configurable?.resultId,
         resultVersion: config.configurable?.version,
       });
@@ -558,6 +567,82 @@ export class BuiltinGenerateCodeArtifact extends AgentBaseTool<BuiltinToolParams
       };
     }
   }
+
+  /**
+   * Check if the filename indicates an HTML file
+   */
+  private isHtmlFile(filename: string): boolean {
+    const ext = filename.toLowerCase().split('.').pop();
+    return ext === 'html' || ext === 'htm';
+  }
+
+  /**
+   * Replace file placeholders in content with HTTP URLs.
+   * Supported formats:
+   * - `![alt](file-content://df-xxx)` → Direct file content URL (for images)
+   * - `[text](file://df-xxx)` → Share page URL (for links)
+   *
+   * For HTML files, all file references (including audio/video src) use content URLs
+   * to ensure proper media playback.
+   */
+  private async replaceFilePlaceholders(content: string, filename: string): Promise<string> {
+    if (!content) {
+      return content;
+    }
+
+    // Use shared utility to check for and extract all file IDs
+    if (!hasFileIds(content)) {
+      return content;
+    }
+
+    // Extract all unique file IDs using shared utility
+    const uniqueFileIds = extractAllFileIds(content);
+
+    if (uniqueFileIds.length === 0) {
+      return content;
+    }
+
+    const { reflyService, user } = this.params;
+
+    // Get both URL types for each file
+    const urlResults = await Promise.all(
+      uniqueFileIds.map(async (fileId) => {
+        try {
+          const { url, contentUrl } = await reflyService.createShareForDriveFile(user, fileId);
+          return { fileId, shareUrl: url, contentUrl };
+        } catch (error) {
+          console.error(
+            `[BuiltinGenerateCodeArtifact] Failed to create share URL for fileId ${fileId}:`,
+            error,
+          );
+          return { fileId, shareUrl: null, contentUrl: null };
+        }
+      }),
+    );
+
+    // Build URL maps
+    const shareUrlMap = new Map<string, string>();
+    const contentUrlMap = new Map<string, string>();
+
+    for (const { fileId, shareUrl, contentUrl } of urlResults) {
+      if (shareUrl) {
+        shareUrlMap.set(fileId, shareUrl);
+      }
+      if (contentUrl) {
+        contentUrlMap.set(fileId, contentUrl);
+      }
+    }
+
+    // For HTML files, use appropriate URLs based on attribute type:
+    // - src attributes (images, audio, video): contentUrl for direct playback
+    // - href attributes (links): shareUrl for navigation to share page
+    if (this.isHtmlFile(filename)) {
+      return replaceAllHtmlFileIds(content, contentUrlMap, shareUrlMap);
+    }
+
+    // For markdown and other files, use the standard replacement logic
+    return replaceAllMarkdownFileIds(content, contentUrlMap, shareUrlMap);
+  }
 }
 
 export class BuiltinSendEmail extends AgentBaseTool<BuiltinToolParams> {
@@ -567,14 +652,17 @@ export class BuiltinSendEmail extends AgentBaseTool<BuiltinToolParams> {
   schema = z.object({
     subject: z.string().describe('The subject of the email'),
     html: z.string().describe(
-      `The HTML content of the email. When embedding files, use these placeholder formats:
-- \`file://df-<fileId>\` - Creates a shareable preview page link (for text links, clickable content)
-- \`file-content://df-<fileId>\` - Creates a direct file content URL (REQUIRED for <img src="">, <video src="">, etc.)
+      `The HTML content of the email.
 
-CRITICAL: For <img> tags, you MUST use \`file-content://\` format, not \`file://\`.
-Example: <img src="file-content://df-xa4ieer0xx9jod9zcfsu8nnf" />
+## File Embedding (CRITICAL: Use ONLY fileIds from context)
+When embedding files, you MUST use the EXACT fileId provided in context (e.g., from list_files or file metadata).
+⚠️ NEVER invent or guess file IDs. File IDs follow the format \`df-<alphanumeric>\` (e.g., df-abc123xyz).
 
-Use the fileId string directly (format: 'df-' followed by alphanumeric), NOT base64-encoded data.`,
+Placeholder formats:
+- \`file-content://df-<fileId>\` - For images/media in src attributes (direct file URL)
+- \`file://df-<fileId>\` - For links in href attributes (share page URL)
+
+If no files are in context, do NOT use file placeholders.`,
     ),
     to: z
       .string()
@@ -584,17 +672,21 @@ Use the fileId string directly (format: 'df-' followed by alphanumeric), NOT bas
       .optional(),
     attachments: z
       .array(z.string())
-      .describe('File attachments using file-content://df-<fileId> format')
+      .describe(
+        `File attachments using file-content://df-<fileId> format.
+⚠️ CRITICAL: Use ONLY fileIds from context. NEVER invent file IDs.
+Each fileId must be an exact match from list_files or file metadata (format: df-<alphanumeric>).`,
+      )
       .optional(),
   });
 
   description = `Send an email to a specified recipient with subject and HTML content.
 
 ## File Reference Placeholders
-- \`file://df-<fileId>\` → Shareable preview page (for links: <a href="file://df-xxx">)
-- \`file-content://df-<fileId>\` → Direct file content URL (for images: <img src="file-content://df-xxx">)
+- \`file-content://df-<fileId>\` → Use in <img>, <video>, <audio> src attributes (direct file URL)
+- \`file://df-<fileId>\` → Use in <a> href for clickable links (share page URL)
 
-IMPORTANT: Use \`file-content://\` for <img>, <video>, <audio> src attributes. Use \`file://\` for clickable links.`;
+⚠️ IMPORTANT: Only use fileIds that exist in context. Never invent file IDs.`;
 
   protected params: BuiltinToolParams;
 
@@ -612,7 +704,11 @@ IMPORTANT: Use \`file-content://\` for <img>, <video>, <audio> src attributes. U
         html: htmlWithResolvedFiles,
         to: input.to,
         attachments: await Promise.all(
-          input.attachments?.map((file) => this.replaceFilePlaceholders(file)) || [],
+          input.attachments?.map((file) => {
+            const fileId = extractFileId(file);
+            const normalized = fileId && file === fileId ? `file-content://${fileId}` : file;
+            return this.replaceFilePlaceholders(normalized);
+          }) || [],
         ),
       });
 
@@ -635,83 +731,65 @@ IMPORTANT: Use \`file-content://\` for <img>, <video>, <audio> src attributes. U
     }
   }
 
+  /**
+   * Replace file placeholders in HTML content with HTTP URLs.
+   * Supported formats:
+   * - `file-content://df-xxx` → Direct file content URL (for images, embedded media)
+   * - `file://df-xxx` → Share page URL (for links)
+   * - `src="df-xxx"` or `href="df-xxx"` → Bare file IDs in HTML attributes (treated as content URLs)
+   */
   private async replaceFilePlaceholders(html: string): Promise<string> {
-    // Check for both placeholder formats
-    const hasFileContent = html?.includes('file-content://df-');
-    const hasFile = html?.includes('file://df-');
-
-    if (!html || (!hasFileContent && !hasFile)) {
+    if (!html) {
       return html;
     }
 
-    // Match both formats: file-content://df-xxx and file://df-xxx
-    const contentMatchPattern = /file-content:\/\/(df-[a-zA-Z0-9]+)/g;
-    const shareMatchPattern = /(?<!file-content:\/\/)file:\/\/(df-[a-zA-Z0-9]+)/g;
+    // Use shared utility to check for file IDs
+    if (!hasFileIds(html)) {
+      return html;
+    }
 
-    const contentMatches = Array.from(html.matchAll(contentMatchPattern));
-    const shareMatches = Array.from(html.matchAll(shareMatchPattern));
+    // Extract all unique file IDs using shared utility
+    const uniqueFileIds = extractAllFileIds(html);
 
-    if (contentMatches.length === 0 && shareMatches.length === 0) {
+    if (uniqueFileIds.length === 0) {
       return html;
     }
 
     const { reflyService, user } = this.params;
 
-    // Collect all unique file IDs from both patterns
-    const allFileIds = new Set<string>();
-    for (const [, fileId] of contentMatches) {
-      allFileIds.add(fileId);
-    }
-    for (const [, fileId] of shareMatches) {
-      allFileIds.add(fileId);
-    }
-
-    const uniqueFileIds = Array.from(allFileIds);
-
-    // Fetch all drive files
-    const driveFiles = await Promise.all(
-      uniqueFileIds.map(async (fileId) => {
-        const file = await reflyService.readFile(user, fileId);
-        if (!file) {
-          throw new Error(`Drive file not found: ${fileId}`);
-        }
-        return file;
-      }),
-    );
-
     // Get both URL types for each file
     const urlResults = await Promise.all(
-      driveFiles.map(async (file) => {
-        const { url, contentUrl } = await reflyService.createShareForDriveFile(user, file.fileId);
-        return { fileId: file.fileId, shareUrl: url, contentUrl };
+      uniqueFileIds.map(async (fileId) => {
+        try {
+          const { url, contentUrl } = await reflyService.createShareForDriveFile(user, fileId);
+          return { fileId, shareUrl: url, contentUrl };
+        } catch (error) {
+          console.error(
+            `[BuiltinSendEmail] Failed to create share URL for fileId ${fileId}:`,
+            error,
+          );
+          return { fileId, shareUrl: null, contentUrl: null };
+        }
       }),
     );
 
-    // Build maps for both URL types
-    const shareUrlMap = new Map<string, string>();
+    // Build URL maps (only include successful results)
     const contentUrlMap = new Map<string, string>();
+    const shareUrlMap = new Map<string, string>();
 
     for (const { fileId, shareUrl, contentUrl } of urlResults) {
-      if (!shareUrl || !contentUrl) {
-        throw new Error(`Failed to generate URLs for drive file: ${fileId}`);
+      if (contentUrl) {
+        contentUrlMap.set(fileId, contentUrl);
       }
-      shareUrlMap.set(fileId, shareUrl);
-      contentUrlMap.set(fileId, contentUrl);
+      if (shareUrl) {
+        shareUrlMap.set(fileId, shareUrl);
+      }
     }
 
-    // Replace file-content:// with direct content URLs
-    let result = html.replace(
-      contentMatchPattern,
-      (match, fileId: string) => contentUrlMap.get(fileId) ?? match,
-    );
-
-    // Replace file:// with share page URLs (but not file-content://)
-    result = result.replace(
-      /(?<!-)file:\/\/(df-[a-zA-Z0-9]+)/g,
-      (match, fileId: string) => shareUrlMap.get(fileId) ?? match,
-    );
-
-    return result;
+    // Use shared utility to replace all file ID patterns in HTML content
+    // - src attributes (images, audio, video): contentUrl for direct playback
+    // - href attributes (links): shareUrl for navigation to share page
+    return replaceAllHtmlFileIds(html, contentUrlMap, shareUrlMap);
   }
 }
 
@@ -774,7 +852,9 @@ export class BuiltinReadFile extends AgentBaseTool<BuiltinToolParams> {
 
 Supported types:
 - Text files (txt, md, json, csv, js, py, xml, yaml...): Returns raw content
-- PDF / Word (.docx) / EPUB: Returns extracted text (max 3000 words, truncated if exceeded)
+- PDF / Word (.docx) / EPUB: Returns extracted text
+
+Token limit: 25,000 tokens (~100K chars). Large files are truncated with head/tail preservation.
 
 NOT supported: Images, Audio, Video (returns error)
 
@@ -798,11 +878,32 @@ Latency: <2s`;
         summary: `Successfully read file: "${file.name}" with file ID: ${file.fileId}`,
       };
     } catch (error) {
+      const err = error as { code?: string; message?: string };
+      const errorMessage = err.message || 'Unknown error';
+
+      // Check for file size limit error (E3006) - guide LLM to use execute_code
+      if (err.code === 'E3006') {
+        return {
+          status: 'error',
+          error: 'FILE_TOO_LARGE',
+          data: {
+            fileId: input.fileId,
+            fileName: input.fileName,
+            suggestion:
+              'This file exceeds the size limit for direct reading. Use the execute_code tool to process it with custom Python/JavaScript code.',
+          },
+          summary: errorMessage,
+        };
+      }
+
       return {
         status: 'error',
         error: 'Error reading file',
-        summary:
-          error instanceof Error ? error.message : 'Unknown error occurred while reading file',
+        data: {
+          fileId: input.fileId,
+          fileName: input.fileName,
+        },
+        summary: errorMessage,
       };
     }
   }
@@ -812,12 +913,23 @@ export class BuiltinListFiles extends AgentBaseTool<BuiltinToolParams> {
   name = 'list_files';
   toolsetKey = 'list_files';
 
-  // No parameters needed - canvasId is obtained from context automatically
-  schema = z.object({});
+  schema = z.object({
+    source: z
+      .enum(['manual', 'variable', 'agent'])
+      .optional()
+      .describe(
+        'Filter files by source: manual (user uploaded), variable (from workflow variables), agent (created by agent). If not specified, returns all files.',
+      ),
+  });
 
-  description = `List all files in the current canvas.
+  description = `List files in the current canvas.
 
-Returns a list of files with their IDs and names. Use the fileId with read_file tool to read file content.`;
+Returns a list of files with their IDs and names. Use the fileId with read_file tool to read file content.
+
+Optional filter by source:
+- manual: Files uploaded by user
+- variable: Files from workflow variables
+- agent: Files created by agent`;
 
   protected params: BuiltinToolParams;
 
@@ -827,7 +939,7 @@ Returns a list of files with their IDs and names. Use the fileId with read_file 
   }
 
   async _call(
-    _input: z.infer<typeof this.schema>,
+    input: z.infer<typeof this.schema>,
     _: unknown,
     config: RunnableConfig,
   ): Promise<ToolCallResult> {
@@ -843,27 +955,52 @@ Returns a list of files with their IDs and names. Use the fileId with read_file 
         };
       }
 
-      const files = await reflyService.listFiles(user, canvasId);
+      const files = await reflyService.listFiles(user, canvasId, input.source);
 
       if (!files || files.length === 0) {
+        const sourceFilter = input.source ? ` (source: ${input.source})` : '';
         return {
           status: 'success',
-          data: [],
-          summary: 'No files found in the current canvas',
+          data: input.source ? [] : { manual: [], variable: [], agent: [] },
+          summary: `No files found in the current canvas${sourceFilter}`,
         };
       }
 
-      // Return simplified file info for LLM consumption
-      const fileList = files.map((f) => ({
+      // Simplified file info for LLM consumption
+      const toFileInfo = (f: (typeof files)[0]) => ({
         fileId: f.fileId,
         fileName: f.name,
         type: f.type,
-      }));
+      });
+
+      // If source filter specified, return flat list; otherwise group by source
+      if (input.source) {
+        return {
+          status: 'success',
+          data: files.map(toFileInfo),
+          summary: `Found ${files.length} ${input.source} file(s): ${files.map((f) => f.name).join(', ')}`,
+        };
+      }
+
+      // Group by source for better LLM understanding
+      const grouped = {
+        manual: files.filter((f) => f.source === 'manual').map(toFileInfo),
+        variable: files.filter((f) => f.source === 'variable').map(toFileInfo),
+        agent: files.filter((f) => f.source === 'agent').map(toFileInfo),
+      };
+
+      const counts = [
+        grouped.manual.length && `${grouped.manual.length} manual`,
+        grouped.variable.length && `${grouped.variable.length} variable`,
+        grouped.agent.length && `${grouped.agent.length} agent`,
+      ]
+        .filter(Boolean)
+        .join(', ');
 
       return {
         status: 'success',
-        data: fileList,
-        summary: `Found ${files.length} file(s) in the canvas: ${files.map((f) => f.name).join(', ')}`,
+        data: grouped,
+        summary: `Found ${files.length} file(s) in canvas (${counts})`,
       };
     } catch (error) {
       return {
@@ -871,6 +1008,245 @@ Returns a list of files with their IDs and names. Use the fileId with read_file 
         error: 'Error listing files',
         summary:
           error instanceof Error ? error.message : 'Unknown error occurred while listing files',
+      };
+    }
+  }
+}
+
+// ============================================================================
+// Read Agent Result Tool - Read full content of a previous agent result
+// ============================================================================
+
+export const BuiltinReadAgentResultDefinition: ToolsetDefinition = {
+  key: 'read_agent_result',
+  internal: true,
+  labelDict: {
+    en: 'Read Agent Result',
+    'zh-CN': '读取执行结果',
+  },
+  descriptionDict: {
+    en: 'Read full content of a previous agent result.',
+    'zh-CN': '读取前置节点的完整执行结果。',
+  },
+};
+
+// Maximum tokens for read_agent_result output (to prevent context explosion)
+const MAX_AGENT_RESULT_TOKENS = 8000;
+
+/**
+ * Truncate content from the end (keep tail), trying to start from sentence boundary
+ */
+function truncateFromEnd(content: string, maxTokens: number): string {
+  if (!content) return '';
+
+  // Rough estimate: 1 token ≈ 3.5 chars for mixed content
+  const estimatedChars = maxTokens * 3.5;
+  if (content.length <= estimatedChars) {
+    return content;
+  }
+
+  const tail = content.slice(-estimatedChars);
+
+  // Try to start from a sentence boundary (within first 30% of tail)
+  const sentenceStart = tail.search(/[.。!！?？\n]\s*/);
+  if (sentenceStart !== -1 && sentenceStart < tail.length * 0.3) {
+    return `[...truncated...]\n\n${tail.slice(sentenceStart + 1).trim()}`;
+  }
+
+  return `[...truncated...]\n\n${tail.trim()}`;
+}
+
+export class BuiltinReadAgentResult extends AgentBaseTool<BuiltinToolParams> {
+  name = 'read_agent_result';
+  toolsetKey = 'read_agent_result';
+
+  schema = z.object({
+    resultId: z.string().describe('The result ID to read (from context resultsMeta)'),
+  });
+
+  description = `Read the full execution result of a previous agent/skill node.
+The summary in resultsMeta is just a naive tail truncation and is UNRELIABLE.
+ALWAYS use this tool when:
+- The task relates to or builds upon previous results
+- contentTokens > 300 (contains substantial content worth reading)
+- You need specific details, reasoning, or data from the result
+Returns AI's reasoning/responses with tool call placeholders.`;
+
+  protected params: BuiltinToolParams;
+
+  constructor(params: BuiltinToolParams) {
+    super(params);
+    this.params = params;
+  }
+
+  async _call(input: z.infer<typeof this.schema>): Promise<ToolCallResult> {
+    try {
+      const { reflyService, user } = this.params;
+      const result = await reflyService.getActionResult(user, {
+        resultId: input.resultId,
+      });
+
+      if (!result) {
+        return {
+          status: 'error',
+          error: 'Result not found',
+          summary: `No result found for resultId: ${input.resultId}`,
+        };
+      }
+
+      const formattedContent = this.formatResultWithToolPlaceholders(result);
+
+      // Truncate from end if content is too long (keep tail which usually has conclusions)
+      const truncatedContent = truncateFromEnd(formattedContent, MAX_AGENT_RESULT_TOKENS);
+
+      return {
+        status: 'success',
+        data: {
+          content: truncatedContent,
+          title: result.title || 'Untitled',
+          resultId: input.resultId,
+        },
+        summary: `Successfully read agent result: ${result.title || input.resultId}`,
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: 'Error reading agent result',
+        summary:
+          error instanceof Error
+            ? error.message
+            : 'Unknown error occurred while reading agent result',
+      };
+    }
+  }
+
+  /**
+   * Format ActionResult with AI content and tool call placeholders.
+   */
+  private formatResultWithToolPlaceholders(result: any): string {
+    const messages = result.messages;
+
+    // If no messages, fallback to steps
+    if (!messages || messages.length === 0) {
+      if (result.steps && result.steps.length > 0) {
+        return result.steps.map((step: any) => step?.content || '').join('\n\n');
+      }
+      return 'No content available for this result.';
+    }
+
+    const parts: string[] = [];
+
+    for (const msg of messages) {
+      if (msg.type === 'ai') {
+        const reasoning = msg.reasoningContent || '';
+        const content = msg.content || '';
+        const fullContent = reasoning ? `${reasoning}\n\n${content}` : content;
+        if (fullContent.trim()) {
+          parts.push(fullContent);
+        }
+      } else if (msg.type === 'tool') {
+        const tc = msg.toolCallResult;
+        if (tc) {
+          const status = tc.status || 'unknown';
+          const toolName = tc.toolName || 'unknown';
+          const callId = tc.callId || 'unknown';
+          parts.push(`[Tool Call: ${callId} | ${toolName} | ${status}]`);
+        }
+      }
+    }
+
+    return parts.join('\n\n');
+  }
+}
+
+// ============================================================================
+// Read Tool Result Tool - Read detailed input/output of a specific tool call
+// ============================================================================
+
+export const BuiltinReadToolResultDefinition: ToolsetDefinition = {
+  key: 'read_tool_result',
+  internal: true,
+  labelDict: {
+    en: 'Read Tool Result',
+    'zh-CN': '读取工具结果',
+  },
+  descriptionDict: {
+    en: 'Read detailed input/output of a specific tool call.',
+    'zh-CN': '读取特定工具调用的详细输入输出。',
+  },
+};
+
+export class BuiltinReadToolResult extends AgentBaseTool<BuiltinToolParams> {
+  name = 'read_tool_result';
+  toolsetKey = 'read_tool_result';
+
+  schema = z.object({
+    resultId: z.string().describe('The result ID containing the tool call'),
+    callId: z.string().describe('The tool call ID to read'),
+  });
+
+  description = `Read the detailed input and output of a specific tool call.
+Use this when you need the full tool execution details (input parameters and output).
+Check toolCallsMeta.status first - only read if status is 'success' and you need the data.`;
+
+  protected params: BuiltinToolParams;
+
+  constructor(params: BuiltinToolParams) {
+    super(params);
+    this.params = params;
+  }
+
+  async _call(input: z.infer<typeof this.schema>): Promise<ToolCallResult> {
+    try {
+      const { reflyService, user } = this.params;
+      const result = await reflyService.getActionResult(user, {
+        resultId: input.resultId,
+      });
+
+      if (!result) {
+        return {
+          status: 'error',
+          error: 'Result not found',
+          summary: `No result found for resultId: ${input.resultId}`,
+        };
+      }
+
+      const toolCall =
+        (result.toolCalls ?? []).find((tc: any) => tc.callId === input.callId) ??
+        (result.steps?.flatMap((step: any) => step?.toolCalls ?? []) ?? []).find(
+          (tc: any) => tc?.callId === input.callId,
+        ) ??
+        (result.messages?.map((msg: any) => msg?.toolCallResult) ?? []).find(
+          (tc: any) => tc?.callId === input.callId,
+        );
+      if (!toolCall) {
+        return {
+          status: 'error',
+          error: 'Tool call not found',
+          summary: `No tool call found with callId: ${input.callId} in result: ${input.resultId}`,
+        };
+      }
+
+      return {
+        status: 'success',
+        data: {
+          callId: toolCall.callId,
+          toolName: toolCall.toolName,
+          status: toolCall.status,
+          input: toolCall.input,
+          output: toolCall.output,
+          error: toolCall.error,
+        },
+        summary: `Successfully read tool result: ${toolCall.toolName} (${input.callId})`,
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: 'Error reading tool result',
+        summary:
+          error instanceof Error
+            ? error.message
+            : 'Unknown error occurred while reading tool result',
       };
     }
   }
@@ -923,6 +1299,16 @@ export class BuiltinExecuteCodeToolset extends AgentBaseToolset<BuiltinToolParam
   tools = [BuiltinExecuteCode] satisfies readonly AgentToolConstructor<BuiltinToolParams>[];
 }
 
+export class BuiltinReadAgentResultToolset extends AgentBaseToolset<BuiltinToolParams> {
+  toolsetKey = BuiltinReadAgentResultDefinition.key;
+  tools = [BuiltinReadAgentResult] satisfies readonly AgentToolConstructor<BuiltinToolParams>[];
+}
+
+export class BuiltinReadToolResultToolset extends AgentBaseToolset<BuiltinToolParams> {
+  toolsetKey = BuiltinReadToolResultDefinition.key;
+  tools = [BuiltinReadToolResult] satisfies readonly AgentToolConstructor<BuiltinToolParams>[];
+}
+
 export class BuiltinToolset extends AgentBaseToolset<BuiltinToolParams> {
   toolsetKey = BuiltinToolsetDefinition.key;
   tools = [
@@ -934,5 +1320,7 @@ export class BuiltinToolset extends AgentBaseToolset<BuiltinToolParams> {
     BuiltinReadFile,
     BuiltinListFiles,
     BuiltinExecuteCode,
+    BuiltinReadAgentResult,
+    BuiltinReadToolResult,
   ] satisfies readonly AgentToolConstructor<BuiltinToolParams>[];
 }

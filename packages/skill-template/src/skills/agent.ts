@@ -9,14 +9,16 @@ import {
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
+import pLimit from 'p-limit';
 import { BaseSkill, BaseSkillState, SkillRunnableConfig, baseStateGraphArgs } from '../base';
 import { Icon, SkillTemplateConfigDefinition, User } from '@refly/openapi-schema';
 
 // types
 import { GraphState } from '../scheduler/types';
 // utils
-import { buildFinalRequestMessages } from '../scheduler/utils/message';
+import { buildFinalRequestMessages, applyAgentLoopCaching } from '../scheduler/utils/message';
 import { compressAgentLoopMessages } from '../utils/context-manager';
+import { getModelSceneFromMode } from '@refly/utils';
 
 // prompts
 import { buildNodeAgentSystemPrompt } from '../prompts/node-agent';
@@ -27,7 +29,9 @@ import { AIMessage, ToolMessage } from '@langchain/core/messages';
 import type { BaseMessage } from '@langchain/core/messages';
 import type { Runnable } from '@langchain/core/runnables';
 import { type StructuredToolInterface } from '@langchain/core/tools';
+import { isGeminiModel } from '@refly/providers';
 import { countToken } from '../scheduler/utils/token';
+import { simplifyToolForGemini } from '../utils/schema-simplifier';
 
 // Constants for recursion control
 const MAX_TOOL_ITERATIONS = 25;
@@ -35,9 +39,27 @@ const MAX_TOOL_ITERATIONS = 25;
 const DEFAULT_RECURSION_LIMIT = 2 * MAX_TOOL_ITERATIONS + 1;
 // Max consecutive identical tool calls to detect infinite loops
 const MAX_IDENTICAL_TOOL_CALLS = 3;
+// Default maximum concurrent tool calls (can be overridden by WORKFLOW_TOOL_PARALLEL_CONCURRENCY env var)
+const DEFAULT_TOOL_PARALLEL_CONCURRENCY = 10;
 
 // WeakMap cache for Zod to JSON Schema conversion (avoids repeated conversions)
 const zodSchemaCache = new WeakMap<object, object>();
+
+/**
+ * Get tool parallel concurrency limit from environment variable
+ * @returns Maximum number of concurrent tool calls
+ */
+function getToolParallelConcurrency(): number {
+  const envConcurrency = process.env.WORKFLOW_TOOL_PARALLEL_CONCURRENCY;
+  if (envConcurrency) {
+    const parsed = Number.parseInt(envConcurrency, 10);
+    if (!Number.isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return DEFAULT_TOOL_PARALLEL_CONCURRENCY;
+}
 
 /**
  * Convert Zod schema to JSON Schema with caching.
@@ -95,18 +117,26 @@ export class Agent extends BaseSkill {
 
   commonPreprocess = async (state: GraphState, config: SkillRunnableConfig) => {
     const { messages = [], images = [] } = state;
-    const { preprocessResult, mode = 'node_agent' } = config.configurable;
+    const {
+      preprocessResult,
+      mode = 'node_agent',
+      ptcEnabled = false,
+      ptcContext = undefined,
+      ptcSequential = false,
+    } = config.configurable;
     const { optimizedQuery, context, sources, usedChatHistory } = preprocessResult;
 
     const systemPrompt =
       mode === 'copilot_agent'
         ? buildWorkflowCopilotPrompt({
             installedToolsets: config.configurable.installedToolsets ?? [],
+            nodeEditContext: config.configurable.nodeEditContext,
+            webSearchEnabled: config.configurable.webSearchEnabled ?? false,
           })
-        : buildNodeAgentSystemPrompt();
+        : buildNodeAgentSystemPrompt({ ptcEnabled, ptcContext, ptcSequential });
 
-    // Use copilot scene for copilot_agent mode, otherwise use chat scene
-    const modelConfigScene = mode === 'copilot_agent' ? 'copilot' : 'chat';
+    // Use copilot scene for copilot_agent mode, agent scene for node_agent mode, otherwise use chat scene
+    const modelConfigScene = getModelSceneFromMode(mode);
     const modelInfo = config?.configurable?.modelConfigMap?.[modelConfigScene];
     const hasVisionCapability = modelInfo?.capabilities?.vision ?? false;
 
@@ -127,14 +157,22 @@ export class Agent extends BaseSkill {
     _user: User,
     config?: SkillRunnableConfig,
   ): Promise<AgentComponents> {
-    const { selectedTools = [], mode = 'node_agent' } = config?.configurable ?? {};
+    const {
+      selectedTools: rawSelectedTools = [],
+      builtInTools = [],
+      mode = 'node_agent',
+      ptcEnabled = false,
+    } = config?.configurable ?? {};
+
+    // In PTC mode, only use builtin tools in the tool definition
+    const selectedTools = ptcEnabled ? builtInTools : rawSelectedTools;
 
     let actualToolNodeInstance: ToolNode<typeof MessagesAnnotation.State> | null = null;
     let availableToolsForNode: StructuredToolInterface[] = [];
 
     // LLM and LangGraph Setup
-    // Use copilot scene for copilot_agent mode, otherwise use chat scene
-    const modelScene = mode === 'copilot_agent' ? 'copilot' : 'chat';
+    // Use copilot scene for copilot_agent mode, agent scene for node_agent mode, otherwise use chat scene
+    const modelScene = getModelSceneFromMode(mode);
     const baseLlm = this.engine.chatModel({ temperature: 0.1 }, modelScene);
     let llmForGraph: Runnable<BaseMessage[], AIMessage>;
 
@@ -157,12 +195,30 @@ export class Agent extends BaseSkill {
 
       if (validTools.length > 0) {
         const toolNames = validTools.map((tool) => tool.name);
-        this.engine.logger.info(
-          `Binding ${validTools.length} valid tools to LLM with tool_choice="auto": [${toolNames.join(', ')}]`,
-        );
+
+        const agentModelInfo = config?.configurable?.modelConfigMap?.agent;
+        const supportsToolChoice = agentModelInfo?.capabilities?.supportToolChoice !== false;
+
+        // Check if current LLM is Gemini - if so, simplify tool schemas
+        const isGemini = isGeminiModel(baseLlm);
+        const toolsForBinding = isGemini
+          ? validTools.map((tool) => {
+              this.engine.logger.info(
+                `Simplifying schema for tool "${tool.name}" for Gemini compatibility`,
+              );
+              return simplifyToolForGemini(tool);
+            })
+          : validTools;
+
         // Use tool_choice="auto" to force LLM to decide when to use tools
         // This ensures proper tool_calls format generation
-        llmForGraph = baseLlm.bindTools(validTools, { tool_choice: 'auto' });
+        // Some models (e.g., Claude Haiku) do not support tool_choice parameter
+        const bindOptions = supportsToolChoice ? { tool_choice: 'auto' } : undefined;
+        this.engine.logger.info(
+          `Binding ${toolsForBinding.length} valid tools to LLM with options: ${JSON.stringify(bindOptions)}: [${toolNames.join(', ')}]`,
+        );
+        llmForGraph = baseLlm.bindTools(toolsForBinding, bindOptions);
+
         actualToolNodeInstance = new ToolNode(validTools);
         availableToolsForNode = validTools;
       } else {
@@ -175,6 +231,10 @@ export class Agent extends BaseSkill {
     }
     // Get compression context from config
     const { user, canvasId, resultId, version } = config?.configurable ?? {};
+
+    // Get model info for context caching check
+    const agentModelInfo = config?.configurable?.modelConfigMap?.agent;
+    const supportsContextCaching = !!agentModelInfo?.capabilities?.contextCaching;
 
     const llmNodeForCachedGraph = async (nodeState: typeof MessagesAnnotation.State) => {
       try {
@@ -219,6 +279,10 @@ export class Agent extends BaseSkill {
           }
         }
 
+        // Apply context caching for each iteration if the model supports it
+        // This ensures new messages (AIMessage with tool_calls, ToolMessage) get cache points
+        currentMessages = applyAgentLoopCaching(currentMessages, supportsContextCaching);
+
         // Use llmForGraph, which is the (potentially tool-bound) LLM instance for the graph
         const response = await llmForGraph.invoke(currentMessages);
         return { messages: [response] };
@@ -241,11 +305,12 @@ export class Agent extends BaseSkill {
     workflow = workflow.addEdge(START, 'llm');
 
     if (actualToolNodeInstance) {
-      // Enhanced tool node with strict sequential execution of tool calls
+      // Get concurrency limit from environment variable
+      const concurrencyLimit = getToolParallelConcurrency();
+
+      // Enhanced tool node with parallel execution of tool calls (with concurrency control)
       const enhancedToolNode = async (toolState: typeof MessagesAnnotation.State) => {
         try {
-          this.engine.logger.info('Executing tool node with strict sequential tool calls');
-
           const priorMessages = toolState.messages ?? [];
           const lastMessage = priorMessages[priorMessages.length - 1] as AIMessage | undefined;
           const toolCalls = lastMessage?.tool_calls ?? [];
@@ -255,70 +320,131 @@ export class Agent extends BaseSkill {
             return { messages: priorMessages };
           }
 
-          const toolResultMessages: BaseMessage[] = [];
+          this.engine.logger.info(
+            `Executing ${toolCalls.length} tool calls with concurrency limit ${concurrencyLimit}: [${toolCalls.map((tc) => tc?.name).join(', ')}]`,
+          );
 
-          // Execute each tool call strictly in sequence
-          for (const call of toolCalls) {
-            const toolName = call?.name ?? '';
-            const toolArgs = (call?.args as Record<string, unknown>) ?? {};
+          // Create a concurrency limiter
+          const limit = pLimit(concurrencyLimit);
 
-            if (!toolName) {
-              this.engine.logger.warn('Encountered a tool call with empty name, skipping');
-              toolResultMessages.push(
-                new ToolMessage({
-                  content: 'Error: Tool name is missing',
-                  tool_call_id: call?.id ?? '',
-                  name: toolName || 'unknown_tool',
-                }),
+          // Execute all tool calls with concurrency control
+          const toolPromises = toolCalls.map((call, index) =>
+            limit(async () => {
+              const toolName = call?.name ?? '';
+              const toolArgs = (call?.args as Record<string, unknown>) ?? {};
+              const toolCallId = call?.id ?? '';
+
+              if (!toolName) {
+                this.engine.logger.warn(`Tool call at index ${index} has empty name`);
+                return {
+                  index,
+                  message: new ToolMessage({
+                    content: 'Error: Tool name is missing',
+                    tool_call_id: toolCallId,
+                    name: 'unknown_tool',
+                  }),
+                };
+              }
+
+              const matchedTool = (availableToolsForNode || []).find((t) => t?.name === toolName);
+
+              if (!matchedTool) {
+                this.engine.logger.warn(`Tool not found: ${toolName}`);
+                return {
+                  index,
+                  message: new ToolMessage({
+                    content: `Error: Tool '${toolName}' not available`,
+                    tool_call_id: toolCallId,
+                    name: toolName,
+                  }),
+                };
+              }
+
+              try {
+                const rawResult = await matchedTool.invoke(toolArgs);
+                const stringified =
+                  typeof rawResult === 'string'
+                    ? rawResult
+                    : JSON.stringify(rawResult ?? {}, null, 2);
+
+                this.engine.logger.info(`Tool '${toolName}' completed successfully`);
+                return {
+                  index,
+                  message: new ToolMessage({
+                    content: stringified,
+                    tool_call_id: toolCallId,
+                    name: matchedTool.name,
+                  }),
+                };
+              } catch (toolError) {
+                const errMsg =
+                  (toolError as Error)?.message ?? String(toolError ?? 'Unknown tool error');
+                this.engine.logger.error(`Tool '${toolName}' failed: ${errMsg}`);
+                return {
+                  index,
+                  message: new ToolMessage({
+                    content: `Error executing tool '${toolName}': ${errMsg}`,
+                    tool_call_id: toolCallId,
+                    name: matchedTool.name,
+                  }),
+                };
+              }
+            }),
+          );
+
+          // Wait for all tools to complete
+          const results = await Promise.all(toolPromises);
+
+          // Sort by original index to maintain order for LLM context
+          const toolResultMessages = results
+            .sort((a, b) => a.index - b.index)
+            .map((r) => r.message);
+
+          this.engine.logger.info(`All ${toolCalls.length} tool calls completed`);
+          if ((lastMessage as any).response_metadata?.model_provider === 'google-vertexai') {
+            const originalSignatures = (lastMessage as any).additional_kwargs?.signatures as any[];
+            const toolCallsCount = lastMessage.tool_calls?.length ?? 0;
+
+            // CRITICAL: Vertex AI (Gemini) requires valid signatures for tool calls
+            // The signatures array structure varies based on the response:
+            // - Valid signatures can be anywhere: beginning, middle, or end
+            // - Empty strings are placeholders for text parts
+            // Strategy: Find the first non-empty signature, then take N consecutive elements
+            // from that position, preserving the original structure and positional relationships
+            if (Array.isArray(originalSignatures) && originalSignatures.length > toolCallsCount) {
+              // Find the index of the first non-empty signature
+              const firstNonEmptyIndex = originalSignatures.findIndex(
+                (s) => typeof s === 'string' && s.length > 0,
               );
-              continue;
+
+              if (firstNonEmptyIndex >= 0) {
+                // Take N consecutive elements starting from the first non-empty signature
+                const extractedSignatures = originalSignatures.slice(
+                  firstNonEmptyIndex,
+                  firstNonEmptyIndex + toolCallsCount,
+                );
+
+                // If we don't have enough elements, pad with empty strings
+                while (extractedSignatures.length < toolCallsCount) {
+                  extractedSignatures.push('');
+                }
+
+                lastMessage.additional_kwargs.signatures = extractedSignatures;
+              } else {
+                // Fallback: no non-empty signatures found (shouldn't happen)
+                this.engine.logger.warn(
+                  `No non-empty signatures found for ${toolCallsCount} tool calls`,
+                );
+                lastMessage.additional_kwargs.signatures = originalSignatures.slice(
+                  0,
+                  toolCallsCount,
+                );
+              }
             }
 
-            const matchedTool = (availableToolsForNode || []).find((t) => t?.name === toolName);
-
-            if (!matchedTool) {
-              this.engine.logger.warn(`Requested tool not found: ${toolName}`);
-              toolResultMessages.push(
-                new ToolMessage({
-                  content: `Error: Tool '${toolName}' not available`,
-                  tool_call_id: call?.id ?? '',
-                  name: toolName,
-                }),
-              );
-              continue;
-            }
-
-            try {
-              // Each invocation awaited to ensure strict serial execution
-              const rawResult = await matchedTool.invoke(toolArgs);
-              const stringified =
-                typeof rawResult === 'string'
-                  ? rawResult
-                  : JSON.stringify(rawResult ?? {}, null, 2);
-
-              toolResultMessages.push(
-                new ToolMessage({
-                  content: stringified,
-                  tool_call_id: call?.id ?? '',
-                  name: matchedTool.name,
-                }),
-              );
-
-              this.engine.logger.info(`Tool '${toolName}' executed successfully`);
-            } catch (toolError) {
-              const errMsg =
-                (toolError as Error)?.message ?? String(toolError ?? 'Unknown tool error');
-              this.engine.logger.error(`Tool '${toolName}' execution failed: ${errMsg}`);
-              toolResultMessages.push(
-                new ToolMessage({
-                  content: `Error executing tool '${toolName}': ${errMsg}`,
-                  tool_call_id: call?.id ?? '',
-                  name: matchedTool.name,
-                }),
-              );
-            }
+            // Clear content to avoid 400 INVALID_ARGUMENT when AIMessage has both text and tool_calls
+            lastMessage.content = '';
           }
-
           return { messages: [...priorMessages, ...toolResultMessages] };
         } catch (error) {
           this.engine.logger.error('Tool node execution failed:', error);
@@ -410,6 +536,16 @@ export class Agent extends BaseSkill {
 
     config.metadata.step = { name: 'answerQuestion' };
 
+    const ptcEnabled = config.configurable.ptcEnabled;
+    const ptcContext = config.configurable.ptcContext;
+    const ptcMetadata =
+      ptcEnabled && ptcContext
+        ? {
+            ptcToolsets: ptcContext.toolsets,
+            ptcSdkPathPrefix: ptcContext.sdk.pathPrefix,
+          }
+        : {};
+
     try {
       const result = await compiledLangGraphApp.invoke(
         { messages: requestMessages },
@@ -429,6 +565,8 @@ export class Agent extends BaseSkill {
               description: t.description,
               parameters: getJsonSchema(t.schema),
             })),
+            ptcEnabled,
+            ...ptcMetadata,
             // Runtime config for reproducibility
             // Note: systemPrompt already in input[0], modelConfig duplicates modelParameters
             toolChoice: toolsAvailable ? 'auto' : undefined,

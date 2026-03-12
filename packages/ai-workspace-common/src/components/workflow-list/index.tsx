@@ -1,7 +1,7 @@
 import { useEffect, useCallback, useMemo, memo, useState } from 'react';
 import { time } from '@refly-packages/ai-workspace-common/utils/time';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from '@refly-packages/ai-workspace-common/utils/router';
+import { useNavigate, useLocation } from '@refly-packages/ai-workspace-common/utils/router';
 
 import getClient from '@refly-packages/ai-workspace-common/requests/proxiedRequest';
 
@@ -12,30 +12,43 @@ import { Spin } from '@refly-packages/ai-workspace-common/components/common/spin
 import { useFetchDataList } from '@refly-packages/ai-workspace-common/hooks/use-fetch-data-list';
 import { LOCALE } from '@refly/common-types';
 import { Search, Sort, SortAsc } from 'refly-icons';
-import EmptyImage from '@refly-packages/ai-workspace-common/assets/noResource.svg';
+import EmptyImage from '@refly-packages/ai-workspace-common/assets/noResource.webp';
 import './index.scss';
 import { WorkflowActionDropdown } from '@refly-packages/ai-workspace-common/components/workflow-list/workflowActionDropdown';
 import { useCreateCanvas } from '@refly-packages/ai-workspace-common/hooks/canvas/use-create-canvas';
-import { ListOrder, ShareUser } from '@refly/openapi-schema';
+import { ListOrder, ShareUser, WorkflowSchedule } from '@refly/openapi-schema';
 import { UsedToolsets } from '@refly-packages/ai-workspace-common/components/workflow-list/used-toolsets';
-import defaultAvatar from '@refly-packages/ai-workspace-common/assets/refly_default_avatar.png';
+import { ScheduleColumn } from '@refly-packages/ai-workspace-common/components/workflow-list/schedule-column';
+import { WorkflowFilters } from '@refly-packages/ai-workspace-common/components/workflow-list/workflow-filters';
+import defaultAvatar from '../../assets/refly_default_avatar_v2.webp';
 import { useDebouncedCallback } from 'use-debounce';
-import { useSiderStoreShallow } from '@refly/stores';
+import { useSiderStoreShallow, useSubscriptionStoreShallow } from '@refly/stores';
 import { SettingItem } from '@refly-packages/ai-workspace-common/components/canvas/front-page';
 
 const WorkflowList = memo(() => {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
+  const location = useLocation();
   const language = i18n.languages?.[0];
   const [searchValue, setSearchValue] = useState('');
   const [debouncedSearchValue, setDebouncedSearchValue] = useState('');
 
   const [orderType, setOrderType] = useState<ListOrder>('updationDesc');
 
+  // Filter state - initialize from navigation state if coming from schedule button
+  const [hasScheduleFilter, setHasScheduleFilter] = useState(() => {
+    return location.state?.autoEnableScheduleFilter === true;
+  });
+
   const { debouncedCreateCanvas, isCreating: createCanvasLoading } = useCreateCanvas({});
 
   const { setIsManualCollapse } = useSiderStoreShallow((state) => ({
     setIsManualCollapse: state.setIsManualCollapse,
+  }));
+
+  // Get subscription plan type for schedule quota calculation
+  const { planType } = useSubscriptionStoreShallow((state) => ({
+    planType: state.planType,
   }));
 
   const { setDataList, loadMore, reload, dataList, hasMore, isRequesting } = useFetchDataList({
@@ -45,17 +58,25 @@ const WorkflowList = memo(() => {
           ...queryPayload,
           order: orderType,
           keyword: debouncedSearchValue?.trim() || undefined,
-        },
+          hasSchedule: hasScheduleFilter ? true : undefined,
+        } as any,
       });
       return res?.data ?? { success: true, data: [] };
     },
     pageSize: 20,
-    dependencies: [orderType, debouncedSearchValue],
+    dependencies: [orderType, debouncedSearchValue, hasScheduleFilter],
   });
 
   const debouncedSetSearchValue = useDebouncedCallback((value: string) => {
     setDebouncedSearchValue(value);
   }, 300);
+
+  // Update schedule filter when location state changes (e.g., from View Schedule button)
+  useEffect(() => {
+    if (location.state?.autoEnableScheduleFilter === true) {
+      setHasScheduleFilter(true);
+    }
+  }, [location.state]);
 
   // Debounce search value changes
   useEffect(() => {
@@ -81,13 +102,26 @@ const WorkflowList = memo(() => {
     setSearchValue(value);
   }, []);
 
+  // Calculate total enabled schedules and quota for schedule limit checking
+  const totalEnabledSchedules = useMemo(() => {
+    return dataList.filter((canvas) => canvas.schedule?.isEnabled).length;
+  }, [dataList]);
+
+  const scheduleQuota = useMemo(() => {
+    return planType === 'free' ? 1 : 20;
+  }, [planType]);
+
   const handleEdit = useCallback(
     (canvas: Canvas) => {
       setIsManualCollapse(false);
-      navigate(`/canvas/${canvas.canvasId}`);
+      navigate(`/workflow/${canvas.canvasId}`);
     },
     [navigate, setIsManualCollapse],
   );
+
+  const handleScheduleChange = useCallback(() => {
+    reload();
+  }, [reload]);
 
   // Auto scroll loading effect
   useEffect(() => {
@@ -157,6 +191,23 @@ const WorkflowList = memo(() => {
         },
       },
       {
+        title: t('workflowList.tableTitle.schedule'),
+        dataIndex: 'schedule',
+        key: 'schedule',
+        width: 140,
+        render: (schedule: WorkflowSchedule, record: Canvas) => {
+          return (
+            <ScheduleColumn
+              schedule={schedule}
+              canvasId={record.canvasId}
+              onScheduleChange={handleScheduleChange}
+              totalEnabledSchedules={totalEnabledSchedules}
+              scheduleQuota={scheduleQuota}
+            />
+          );
+        },
+      },
+      {
         title: t('workflowList.tableTitle.owner'),
         dataIndex: 'owner',
         key: 'owner',
@@ -185,7 +236,7 @@ const WorkflowList = memo(() => {
         key: 'updatedAt',
         width: 120,
         render: (updatedAt: string) => (
-          <span className="text-sm text-gray-500 dark:text-gray-400">
+          <span className="text-xs text-gray-500 dark:text-gray-400">
             {time(updatedAt, language as LOCALE)
               .utc()
               .fromNow()}
@@ -196,11 +247,10 @@ const WorkflowList = memo(() => {
         title: t('workflowList.tableTitle.actions'),
         key: 'actions',
         width: 106,
-        align: 'center' as const,
         fixed: 'right' as const,
         render: (_, record: Canvas) => {
           return (
-            <div className="flex items-center justify-center flex-shrink-0">
+            <div className="flex items-center flex-shrink-0">
               <Button
                 type="text"
                 size="small"
@@ -226,7 +276,7 @@ const WorkflowList = memo(() => {
         },
       },
     ],
-    [t, language, handleEdit, afterDelete, reload],
+    [t, language, handleEdit, afterDelete, reload, handleScheduleChange],
   );
 
   const emptyState = (
@@ -253,27 +303,7 @@ const WorkflowList = memo(() => {
       <div className="flex items-center justify-between p-4 gap-2">
         <div className="text-[16px] font-semibold">{t('workflowList.title')}</div>
 
-        {/* Search and Actions Bar */}
-        <div className="flex items-center justify-between gap-3">
-          <Input
-            placeholder={t('workflowList.searchWorkflows')}
-            suffix={<Search size={16} color="var(--refly-text-2)" />}
-            value={searchValue}
-            onChange={(e) => handleSearch(e.target.value)}
-            className="max-w-md"
-            allowClear
-          />
-          <Button
-            className="flex-shrink-0 w-8 h-8 p-0 flex items-center justify-center"
-            onClick={handleOrderType}
-          >
-            {orderType === 'updationAsc' ? (
-              <SortAsc size={20} color="var(--refly-text-0)" />
-            ) : (
-              <Sort size={20} color="var(--refly-text-0)" />
-            )}
-          </Button>
-
+        <div className="flex items-center gap-2">
           <Button type="primary" onClick={handleCreateWorkflow} loading={createCanvasLoading}>
             {t('workflowList.createWorkflow')}
           </Button>
@@ -281,6 +311,36 @@ const WorkflowList = memo(() => {
             <SettingItem showName={false} avatarAlign={'right'} />
           </div>
         </div>
+      </div>
+
+      {/* Search and Filters Bar */}
+      <div className="flex items-center gap-3 px-4 pb-4">
+        <Input
+          placeholder={t('workflowList.searchWorkflows')}
+          prefix={<Search size={16} color="var(--refly-text-2)" />}
+          value={searchValue}
+          onChange={(e) => handleSearch(e.target.value)}
+          className="flex-1 !h-[42px]"
+          allowClear
+        />
+
+        {/* Schedule Filter */}
+        <WorkflowFilters
+          hasScheduleFilter={hasScheduleFilter}
+          onHasScheduleFilterChange={setHasScheduleFilter}
+        />
+
+        {/* Sort Button */}
+        <Button
+          className="flex-shrink-0 w-[42px] h-[42px] p-0 flex items-center justify-center"
+          onClick={handleOrderType}
+        >
+          {orderType === 'updationAsc' ? (
+            <SortAsc size={20} color="var(--refly-text-0)" />
+          ) : (
+            <Sort size={20} color="var(--refly-text-0)" />
+          )}
+        </Button>
       </div>
 
       {/* Content */}
@@ -292,7 +352,7 @@ const WorkflowList = memo(() => {
               dataSource={dataList}
               rowKey="canvasId"
               pagination={false}
-              scroll={{ y: 'calc(var(--screen-height) - 190px)' }}
+              scroll={{ y: 'calc(var(--screen-height) - 220px)' }}
               className="workflow-table flex-1"
               size="middle"
               onRow={(record: Canvas) => ({

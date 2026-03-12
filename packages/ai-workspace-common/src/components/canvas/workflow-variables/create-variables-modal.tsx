@@ -32,6 +32,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
     disableChangeVariableType,
     isFromResource,
     showFileUploadError,
+    fromToolsDependency,
   }) => {
     const { t } = useTranslation();
     const [form] = Form.useForm<VariableFormData>();
@@ -46,6 +47,8 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
 
     // Watch the required field to pass to ResourceTypeForm
     const isRequired = Form.useWatch('required', form) ?? true;
+    // Watch the isSingle field to pass to ResourceTypeForm (default: false = multiple files)
+    const isSingle = Form.useWatch('isSingle', form) ?? false;
 
     const title = useMemo(() => {
       if (disableChangeVariableType) {
@@ -82,7 +85,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
       uploading,
       handleFileUpload: uploadFile,
       handleRefreshFile: refreshFile,
-    } = useFileUpload();
+    } = useFileUpload(10); // Support up to 10 files
 
     const {
       options,
@@ -162,7 +165,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
               selectedValue: selectedValue,
               description: defaultValue.description || '',
               required: defaultValue.required ?? true,
-              isSingle: defaultValue.isSingle ?? true,
+              isSingle: defaultValue.isSingle ?? false,
               options: defaultValue.options || [],
             };
 
@@ -190,6 +193,26 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
         form.setFieldsValue(stringFormData);
       }
     }, [form, variableType, optionFormData, resourceFormData, stringFormData]);
+
+    // Auto show value required error when from tools dependency and value is empty
+    useEffect(() => {
+      if (fromToolsDependency && visible && defaultValue) {
+        // Check if the variable is required and has empty value
+        const isRequired = defaultValue.required ?? true;
+        const hasEmptyValue = !defaultValue.value || defaultValue.value.length === 0;
+
+        if (isRequired && hasEmptyValue) {
+          // Trigger form validation to show errors after a short delay to ensure form is rendered
+          const timer = setTimeout(() => {
+            form.validateFields().catch(() => {
+              // Ignore validation errors, we just want to trigger the display
+            });
+          }, 300);
+
+          return () => clearTimeout(timer);
+        }
+      }
+    }, [fromToolsDependency, visible, defaultValue, form]);
 
     // Handle form values change and store in corresponding form data
     const handleFormValuesChange = useCallback(
@@ -274,13 +297,38 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
             url: result.storageKey, // Store storageKey in url field
           };
 
-          const newFileList = [...fileList, newFile];
-          handleFileListChange(newFileList);
+          // For single file mode, replace the file list; for multi-file mode, append
+          const currentIsSingle = form.getFieldValue('isSingle') ?? false;
+          // Use functional update to get the latest fileList state
+          setFileList((prevFileList) => {
+            const newFileList = currentIsSingle ? [newFile] : [...prevFileList, newFile];
+
+            // Update resource form data with current file list
+            if (variableType === 'resource') {
+              const resourceValues: VariableValue[] = newFileList.map((f) => ({
+                type: 'resource',
+                resource: {
+                  name: f.name || '',
+                  storageKey: f.url || '',
+                  fileType: getFileType(f.name, f.type),
+                },
+              }));
+
+              updateResourceFormData({
+                value: resourceValues,
+              });
+
+              // Update form values to sync with the form
+              form.setFieldValue('value', resourceValues);
+            }
+
+            return newFileList;
+          });
           return false; // Prevent default upload behavior
         }
         return false;
       },
-      [fileList, handleFileListChange, uploadFile],
+      [uploadFile, form, variableType, updateResourceFormData, fileList],
     );
 
     const handleFileRemove = useCallback(
@@ -519,7 +567,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
           required: values.required,
           ...(variableType === 'resource' && {
             resourceTypes: values.resourceTypes || RESOURCE_TYPE,
-            isSingle: true,
+            isSingle: values.isSingle ?? false,
             options: [],
           }),
           ...(variableType === 'option' && {
@@ -561,7 +609,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
             form.setFieldValue(fieldName, [{ text: trimmedValue }]);
           }
         } else {
-          if (value) {
+          if (typeof value === 'string') {
             const trimmedValue = value.trim();
             if (trimmedValue !== value) {
               form.setFieldValue(fieldName, trimmedValue);
@@ -587,6 +635,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
               form={form}
               showError={showFileUploadError && fileList.length === 0}
               isRequired={isRequired}
+              isSingle={isSingle}
             />
           );
         case 'option':
@@ -611,6 +660,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
       }
     }, [
       variableType,
+      handleInputBlur,
       fileList,
       uploading,
       handleFileUpload,
@@ -618,6 +668,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
       handleRefreshFile,
       showFileUploadError,
       isRequired,
+      isSingle,
       options,
       editingIndex,
       currentOption,
@@ -679,7 +730,7 @@ export const CreateVariablesModal: React.FC<CreateVariablesModalProps> = React.m
               onValuesChange={handleFormValuesChange}
               initialValues={{
                 required: true,
-                isSingle: true,
+                isSingle: false,
                 value: [{ type: 'text', text: '' }],
                 currentOption: '',
                 resourceTypes: RESOURCE_TYPE,

@@ -7,14 +7,13 @@ export interface VoucherEmailData {
   discountPercent: number;
   discountValue: string; // e.g., "$8" for 40% off of $20/month
   discountedPrice: string; // e.g., "$12"
-  inviteLink: string;
   expirationDays: number;
 }
 
 /**
  * Generate English email content for voucher notification
  */
-export function generateVoucherEmailEN(data: VoucherEmailData): { subject: string; html: string } {
+function generateVoucherEmailEN(data: VoucherEmailData): { subject: string; html: string } {
   const subject = "🎉 You've Earned an Exclusive Refly Discount!";
 
   const html = `<!DOCTYPE html>
@@ -70,7 +69,7 @@ export function generateVoucherEmailEN(data: VoucherEmailData): { subject: strin
                       Hey <span style="font-weight: 600; color: #0E9F77;">${data.userName}</span>!
                     </p>
                     <p style="margin: 0; font-size: 16px; color: #666666; line-height: 1.6; max-width: 440px; margin: 0 auto;">
-                      Thank you for publishing your template on Refly! As a token of our appreciation, here's an exclusive discount just for you.
+                      Thank you for publishing your template on Refly.ai! As a token of our appreciation, here's an exclusive discount just for you.
                     </p>
                   </td>
                 </tr>
@@ -126,34 +125,6 @@ export function generateVoucherEmailEN(data: VoucherEmailData): { subject: strin
                 </tr>
               </table>
 
-              <!-- Share Section -->
-              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background: linear-gradient(135deg, rgba(14,159,119,0.1) 0%, rgba(14,159,119,0.05) 100%); border-radius: 16px; border: 1px solid rgba(14,159,119,0.2); margin-bottom: 32px;">
-                <tr>
-                  <td style="padding: 24px;">
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
-                      <tr>
-                        <td width="56" valign="top">
-                          <div style="background-color: rgba(14,159,119,0.2); border-radius: 12px; padding: 12px; display: inline-block;">
-                            <span style="font-size: 24px;">👥</span>
-                          </div>
-                        </td>
-                        <td style="padding-left: 16px;">
-                          <h3 style="margin: 0 0 4px; font-size: 16px; font-weight: 600; color: #1a1a1a;">Share the Love</h3>
-                          <p style="margin: 0 0 12px; font-size: 14px; color: #666666;">Your friends can also enjoy this discount!</p>
-                          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #ffffff; border-radius: 12px; border: 1px solid #e5e7eb;">
-                            <tr>
-                              <td style="padding: 12px 16px;">
-                                <a href="${data.inviteLink}" style="color: #0E9F77; font-size: 14px; font-weight: 500; text-decoration: none; word-break: break-all;">${data.inviteLink}</a>
-                              </td>
-                            </tr>
-                          </table>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-
               <!-- Community Section -->
               <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
                 <tr>
@@ -172,7 +143,7 @@ export function generateVoucherEmailEN(data: VoucherEmailData): { subject: strin
                             <tr>
                               <td style="padding: 20px; text-align: center; vertical-align: middle;">
                                 <p style="margin: 0 0 12px; font-size: 14px; font-weight: 600; color: #1a1a1a;">Follow on WeChat</p>
-                                <img src="https://api.refly.ai/v1/drive/file/public/df-h2el23mfac4kyk0r6wintfu7" alt="Refly WeChat" width="100" height="100" style="display: block; margin: 0 auto; border-radius: 8px;" />
+                                <img src="https://api.refly.ai/v1/drive/file/public/df-h2el23mfac4kyk0r6wintfu7" alt="Refly.ai WeChat" width="100" height="100" style="display: block; margin: 0 auto; border-radius: 8px;" />
                                 <p style="margin: 12px 0 0; font-size: 12px; color: #888888;">Scan for latest updates</p>
                               </td>
                             </tr>
@@ -209,7 +180,7 @@ export function generateVoucherEmailEN(data: VoucherEmailData): { subject: strin
                 <tr>
                   <td style="text-align: center; padding-top: 32px;">
                     <p style="margin: 0; font-size: 16px; font-weight: 500; color: #1a1a1a;">Happy Creating!</p>
-                    <p style="margin: 8px 0 0; font-size: 18px; font-weight: 700; color: #0E9F77;">The Refly Team</p>
+                    <p style="margin: 8px 0 0; font-size: 18px; font-weight: 700; color: #0E9F77;">The Refly.ai Team</p>
                   </td>
                 </tr>
               </table>
@@ -224,10 +195,10 @@ export function generateVoucherEmailEN(data: VoucherEmailData): { subject: strin
                 <tr>
                   <td style="text-align: center;">
                     <p style="margin: 0 0 8px; font-size: 14px; color: #666666;">
-                      <span style="color: #0E9F77; font-weight: 600;">Refly</span> Marketplace
+                      <span style="color: #0E9F77; font-weight: 600;">Refly.ai</span> Marketplace
                     </p>
                     <p style="margin: 0; font-size: 12px; color: #888888;">
-                      You received this because you published a template on Refly.
+                      You received this because you published a template on Refly.ai.
                     </p>
                   </td>
                 </tr>
@@ -248,8 +219,8 @@ export function generateVoucherEmailEN(data: VoucherEmailData): { subject: strin
 /**
  * Generate Chinese email content for voucher notification
  */
-export function generateVoucherEmailZH(data: VoucherEmailData): { subject: string; html: string } {
-  const subject = '🎉 恭喜！您获得了 Refly 专属折扣';
+function generateVoucherEmailZH(data: VoucherEmailData): { subject: string; html: string } {
+  const subject = '🎉 恭喜！您获得了 Refly.ai 专属折扣';
 
   const html = `<!DOCTYPE html>
 <html lang="zh">
@@ -271,7 +242,7 @@ export function generateVoucherEmailZH(data: VoucherEmailData): { subject: strin
               <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin: 0 auto 24px;">
                 <tr>
                   <td style="background-color: rgba(255,255,255,0.2); border-radius: 16px; padding: 12px;">
-                    <img src="https://api.refly.ai/v1/drive/file/public/df-eian010yz7r0p7s9t3eh588l" alt="Refly" width="48" height="48" style="display: block;" />
+                    <img src="https://api.refly.ai/v1/drive/file/public/df-eian010yz7r0p7s9t3eh588l" alt="Refly.ai" width="48" height="48" style="display: block;" />
                   </td>
                 </tr>
               </table>
@@ -304,7 +275,7 @@ export function generateVoucherEmailZH(data: VoucherEmailData): { subject: strin
                       <span style="font-weight: 600; color: #0E9F77;">${data.userName}</span>，您好！
                     </p>
                     <p style="margin: 0; font-size: 16px; color: #666666; line-height: 1.6; max-width: 440px; margin: 0 auto;">
-                      感谢您在 Refly 上发布模板！为表感谢，这是专属于您的折扣奖励。
+                      感谢您在 Refly.ai 上发布模板！为表感谢，这是专属于您的折扣奖励。
                     </p>
                   </td>
                 </tr>
@@ -323,7 +294,7 @@ export function generateVoucherEmailZH(data: VoucherEmailData): { subject: strin
                     </table>
 
                     <p style="margin: 0 0 8px; font-size: 12px; color: #888888; text-transform: uppercase; letter-spacing: 1px;">您的折扣</p>
-                    <p style="margin: 0 0 24px; font-size: 56px; font-weight: 700; color: #0E9F77;">${data.discountPercent}% OFF</p>
+                    <p style="margin: 0 0 24px; font-size: 56px; font-weight: 700; color: #0E9F77;">${Math.round((100 - data.discountPercent) / 10)}折</p>
 
                     <!-- Info Grid -->
                     <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
@@ -360,34 +331,6 @@ export function generateVoucherEmailZH(data: VoucherEmailData): { subject: strin
                 </tr>
               </table>
 
-              <!-- Share Section -->
-              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background: linear-gradient(135deg, rgba(14,159,119,0.1) 0%, rgba(14,159,119,0.05) 100%); border-radius: 16px; border: 1px solid rgba(14,159,119,0.2); margin-bottom: 32px;">
-                <tr>
-                  <td style="padding: 24px;">
-                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
-                      <tr>
-                        <td width="56" valign="top">
-                          <div style="background-color: rgba(14,159,119,0.2); border-radius: 12px; padding: 12px; display: inline-block;">
-                            <span style="font-size: 24px;">👥</span>
-                          </div>
-                        </td>
-                        <td style="padding-left: 16px;">
-                          <h3 style="margin: 0 0 4px; font-size: 16px; font-weight: 600; color: #1a1a1a;">分享给朋友</h3>
-                          <p style="margin: 0 0 12px; font-size: 14px; color: #666666;">您的朋友也可以享受这个折扣！</p>
-                          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="background-color: #ffffff; border-radius: 12px; border: 1px solid #e5e7eb;">
-                            <tr>
-                              <td style="padding: 12px 16px;">
-                                <a href="${data.inviteLink}" style="color: #0E9F77; font-size: 14px; font-weight: 500; text-decoration: none; word-break: break-all;">${data.inviteLink}</a>
-                              </td>
-                            </tr>
-                          </table>
-                        </td>
-                      </tr>
-                    </table>
-                  </td>
-                </tr>
-              </table>
-
               <!-- Community Section -->
               <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="border-top: 1px solid #e5e7eb;">
                 <tr>
@@ -406,7 +349,7 @@ export function generateVoucherEmailZH(data: VoucherEmailData): { subject: strin
                             <tr>
                               <td style="padding: 20px; text-align: center; vertical-align: middle;">
                                 <p style="margin: 0 0 12px; font-size: 14px; font-weight: 600; color: #1a1a1a;">关注微信公众号</p>
-                                <img src="https://api.refly.ai/v1/drive/file/public/df-h2el23mfac4kyk0r6wintfu7" alt="Refly 微信公众号" width="100" height="100" style="display: block; margin: 0 auto; border-radius: 8px;" />
+                                <img src="https://api.refly.ai/v1/drive/file/public/df-h2el23mfac4kyk0r6wintfu7" alt="Refly.ai 微信公众号" width="100" height="100" style="display: block; margin: 0 auto; border-radius: 8px;" />
                                 <p style="margin: 12px 0 0; font-size: 12px; color: #888888;">扫码关注获取最新动态</p>
                               </td>
                             </tr>
@@ -443,7 +386,7 @@ export function generateVoucherEmailZH(data: VoucherEmailData): { subject: strin
                 <tr>
                   <td style="text-align: center; padding-top: 32px;">
                     <p style="margin: 0; font-size: 16px; font-weight: 500; color: #1a1a1a;">祝您创作愉快！</p>
-                    <p style="margin: 8px 0 0; font-size: 18px; font-weight: 700; color: #0E9F77;">Refly 团队</p>
+                    <p style="margin: 8px 0 0; font-size: 18px; font-weight: 700; color: #0E9F77;">Refly.ai 团队</p>
                   </td>
                 </tr>
               </table>
@@ -458,10 +401,10 @@ export function generateVoucherEmailZH(data: VoucherEmailData): { subject: strin
                 <tr>
                   <td style="text-align: center;">
                     <p style="margin: 0 0 8px; font-size: 14px; color: #666666;">
-                      <span style="color: #0E9F77; font-weight: 600;">Refly</span> 模板市场
+                      <span style="color: #0E9F77; font-weight: 600;">Refly.ai</span> 模板市场
                     </p>
                     <p style="margin: 0; font-size: 12px; color: #888888;">
-                      您收到此邮件是因为您在 Refly 上发布了模板。
+                      您收到此邮件是因为您在 Refly.ai 上发布了模板。
                     </p>
                   </td>
                 </tr>

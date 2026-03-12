@@ -123,7 +123,7 @@ export class SubscriptionService implements OnModuleInit {
           pattern: '0 * * * *', // Run every hour
         },
         removeOnComplete: true,
-        removeOnFail: false,
+        removeOnFail: true,
         // Add job options for distributed environment
         jobId: 'check-canceled-subscriptions', // Unique job ID to prevent duplicates
         attempts: 3, // Number of retry attempts
@@ -156,7 +156,7 @@ export class SubscriptionService implements OnModuleInit {
           pattern: '*/10 * * * *',
         },
         removeOnComplete: true,
-        removeOnFail: false,
+        removeOnFail: true,
         // Add job options for distributed environment
         jobId: 'expire-and-recharge-credits', // Unique job ID to prevent duplicates
         attempts: 3, // Number of retry attempts
@@ -171,7 +171,7 @@ export class SubscriptionService implements OnModuleInit {
 
   async createCheckoutSession(user: User, param: CreateCheckoutSessionRequest) {
     const { uid } = user;
-    const { planType, interval, voucherId } = param;
+    const { planType, interval, voucherId, voucherEntryPoint, voucherUserType } = param;
     const userPo = await this.prisma.user.findUnique({ where: { uid } });
 
     const plan = await this.prisma.subscriptionPlan.findFirst({
@@ -193,6 +193,7 @@ export class SubscriptionService implements OnModuleInit {
     // Validate and get voucher promotion code if provided
     let stripePromoCodeId: string | undefined;
     let validatedVoucherId: string | undefined;
+    let voucherDiscountPercent: number | undefined;
     if (voucherId) {
       const voucherValidation = await this.voucherService.validateVoucher(uid, voucherId);
       if (voucherValidation.valid && voucherValidation.voucher) {
@@ -200,6 +201,7 @@ export class SubscriptionService implements OnModuleInit {
         if (voucherValidation.voucher.stripePromoCodeId) {
           stripePromoCodeId = voucherValidation.voucher.stripePromoCodeId;
           validatedVoucherId = voucherId;
+          voucherDiscountPercent = voucherValidation.voucher.discountPercent;
           this.logger.log(
             `Using Stripe promotion code ${stripePromoCodeId} for voucher ${voucherId} (${voucherValidation.voucher.discountPercent}% off)`,
           );
@@ -238,6 +240,9 @@ export class SubscriptionService implements OnModuleInit {
     const price = prices.data[0];
     const sessionParams: Stripe.Checkout.SessionCreateParams = {
       mode: 'subscription',
+      ...(interval === 'yearly' && {
+        payment_method_types: ['card'],
+      }),
       line_items: [{ price: price.id, quantity: 1 }],
       success_url: this.config.get('stripe.sessionSuccessUrl'),
       cancel_url: this.config.get('stripe.sessionCancelUrl'),
@@ -247,7 +252,20 @@ export class SubscriptionService implements OnModuleInit {
       consent_collection: {
         terms_of_service: 'required',
       },
-      metadata: validatedVoucherId ? { voucherId: validatedVoucherId } : undefined,
+      metadata: {
+        ...(userPo?.email && { customer_email: userPo.email }),
+        ...(validatedVoucherId && {
+          voucherId: validatedVoucherId,
+          voucherDiscountPercent: voucherDiscountPercent?.toString(),
+          voucherEntryPoint,
+          voucherUserType,
+        }),
+      },
+      subscription_data: {
+        metadata: {
+          ...(userPo?.email && { customer_email: userPo.email }),
+        },
+      },
     };
 
     // Apply voucher promotion code or allow promotion codes (not both)
@@ -257,7 +275,32 @@ export class SubscriptionService implements OnModuleInit {
       sessionParams.allow_promotion_codes = true;
     }
 
-    const session = await this.stripeClient.checkout.sessions.create(sessionParams);
+    let session: Stripe.Checkout.Session;
+    try {
+      session = await this.stripeClient.checkout.sessions.create(sessionParams);
+    } catch (error) {
+      // Handle promotion code restriction error - fallback to session without discount
+      if (
+        error instanceof Stripe.errors.StripeInvalidRequestError &&
+        error.code === 'promotion_code_customer_not_first_time' &&
+        stripePromoCodeId
+      ) {
+        this.logger.warn(
+          `User ${uid} has prior transactions, creating checkout session without promotion code`,
+        );
+
+        // Remove discount and allow manual promotion code entry instead
+        sessionParams.discounts = undefined;
+        sessionParams.metadata = {
+          ...(userPo?.email && { customer_email: userPo.email }),
+        };
+        sessionParams.allow_promotion_codes = true;
+
+        session = await this.stripeClient.checkout.sessions.create(sessionParams);
+      } else {
+        throw error;
+      }
+    }
 
     await this.prisma.$transaction([
       this.prisma.checkoutSession.create({
@@ -339,6 +382,7 @@ export class SubscriptionService implements OnModuleInit {
         terms_of_service: 'required',
       },
       metadata: {
+        ...(userPo?.email && { customer_email: userPo.email }),
         purpose: 'credit_pack',
         packId: param.packId,
         lookupKey,

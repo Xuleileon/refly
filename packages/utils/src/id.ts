@@ -20,10 +20,10 @@ export enum IDPrefix {
   STORAGE_USAGE_METER = 'sum-',
   SKILL = 'sk-',
   SKILL_TRIGGER = 'tr-',
-  SKILL_JOB = 'sj-',
   PILOT_SESSION = 'ps-',
   PILOT_STEP = 'pst-',
   COPILOT_SESSION = 'cps-',
+  WORKFLOW_PLAN = 'wp-',
   WORKFLOW_EXECUTION = 'we-',
   WORKFLOW_NODE_EXECUTION = 'wne-',
   PROVIDER = 'pr-',
@@ -51,6 +51,18 @@ export enum IDPrefix {
   ACTION_MESSAGE = 'am-',
   VOUCHER = 'voucher-',
   VOUCHER_INVITATION = 'vi-',
+  ROUTING_RESULT = 'rrt-',
+  ROUTING_RULE = 'rrl-',
+  WORKFLOW_SCHEDULE = 'wh-',
+  SCHEDULE_RECORD = 'sr-',
+  API_KEY = 'ak-',
+  DEVICE_SESSION = 'ds-',
+  SKILL_PACKAGE = 'skp-',
+  SKILL_PACKAGE_WORKFLOW = 'skpw-',
+  SKILL_PACKAGE_INSTALLATION = 'skpi-',
+  SKILL_PACKAGE_WORKFLOW_DEP = 'skpwd-',
+  SKILL_PACKAGE_WORKFLOW_EXEC = 'skpwe-',
+  SKILL_PACKAGE_EXECUTION = 'skpe-',
 }
 
 export function genUID(): string {
@@ -87,6 +99,10 @@ export function genCopilotSessionID(): string {
 
 export function genVariableExtractionSessionID(): string {
   return IDPrefix.VARIABLE_EXTRACTION_SESSION + createId();
+}
+
+export function genWorkflowPlanID(): string {
+  return IDPrefix.WORKFLOW_PLAN + createId();
 }
 
 export function genWorkflowExecutionID(): string {
@@ -287,6 +303,14 @@ export const genCreditUsageId = () => {
   return `${IDPrefix.CREDIT_USAGE}${timestamp}-${createId()}`;
 };
 
+export function genScheduleId(): string {
+  return IDPrefix.WORKFLOW_SCHEDULE + createId();
+}
+
+export function genScheduleRecordId(): string {
+  return IDPrefix.SCHEDULE_RECORD + createId();
+}
+
 export function genCreditDebtId() {
   const timestamp = Date.now();
   return `${IDPrefix.CREDIT_DEBT}${timestamp}-${createId()}`;
@@ -324,6 +348,14 @@ export function genVoucherInvitationID(): string {
   return IDPrefix.VOUCHER_INVITATION + createId();
 }
 
+export function genRoutingResultID(): string {
+  return IDPrefix.ROUTING_RESULT + createId();
+}
+
+export function genRoutingRuleID(): string {
+  return IDPrefix.ROUTING_RULE + createId();
+}
+
 export function genInviteCode(): string {
   // Generate a short, URL-safe invite code
   return createId().substring(0, 12);
@@ -332,3 +364,35 @@ export function genInviteCode(): string {
 export const genVoucherInviterRewardRechargeId = (invitationId: string) => {
   return `${IDPrefix.CREDIT_RECHARGE}voucher-inviter-${invitationId}`;
 };
+
+export function genApiKeyId(): string {
+  return IDPrefix.API_KEY + createId();
+}
+
+export function genDeviceSessionId(): string {
+  return IDPrefix.DEVICE_SESSION + createId();
+}
+
+export function genSkillPackageID(): string {
+  return IDPrefix.SKILL_PACKAGE + createId();
+}
+
+export function genSkillPackageWorkflowID(): string {
+  return IDPrefix.SKILL_PACKAGE_WORKFLOW + createId();
+}
+
+export function genSkillPackageInstallationID(): string {
+  return IDPrefix.SKILL_PACKAGE_INSTALLATION + createId();
+}
+
+export function genSkillPackageWorkflowDepID(): string {
+  return IDPrefix.SKILL_PACKAGE_WORKFLOW_DEP + createId();
+}
+
+export function genSkillPackageWorkflowExecID(): string {
+  return IDPrefix.SKILL_PACKAGE_WORKFLOW_EXEC + createId();
+}
+
+export function genSkillPackageExecutionID(): string {
+  return IDPrefix.SKILL_PACKAGE_EXECUTION + createId();
+}

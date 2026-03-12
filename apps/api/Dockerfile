@@ -1,9 +1,9 @@
 # Build stage
-FROM node:20.19.1-alpine3.20 AS builder
+FROM node:24.13.1-slim AS builder
 WORKDIR /app
 
-# Install pnpm globally
-RUN npm install -g pnpm
+# Enable corepack and activate pnpm
+RUN corepack enable && corepack prepare pnpm@10.30.2 --activate
 
 # Set environment variables to skip gyp-related installations
 ENV npm_config_gyp_ignore=true
@@ -19,7 +19,8 @@ COPY apps/api/prisma ./apps/api/prisma
 COPY packages/ ./packages/
 
 # Install dependencies with workspace support
-RUN pnpm install --ignore-scripts
+RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store \
+    pnpm install --ignore-scripts
 
 # Copy remaining source code
 COPY . .
@@ -27,40 +28,33 @@ COPY . .
 # Build packages in correct order
 RUN pnpm build:api
 
-# # Clean up development dependencies
-# RUN rm -rf node_modules
-# RUN pnpm install --prod --frozen-lockfile --ignore-scripts
-
-# wkhtmltopdf stage
-FROM surnet/alpine-wkhtmltopdf:3.20.3-0.12.6-small AS wkhtmltopdf
-
 # Production stage
-FROM node:20.19.1-alpine3.20 AS production
+FROM node:24.13.1-slim AS production
 WORKDIR /app
 
 # Install system dependencies in a single layer
-RUN apk add --no-cache \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
     curl \
-    gcompat \
-    libstdc++ \
-    libx11 \
-    libxrender \
-    libxext \
+    wget \
+    libstdc++6 \
+    libx11-6 \
+    libxrender1 \
+    libxext6 \
     libssl3 \
     ca-certificates \
     fontconfig \
-    freetype \
-    font-terminus \
-    font-inconsolata \
-    font-dejavu \
-    font-noto \
-    font-noto-cjk \
-    font-awesome \
-    font-noto-extra \
-    && fc-cache -f
-
-# Copy wkhtmltopdf
-COPY --from=wkhtmltopdf /bin/wkhtmltopdf /bin/wkhtmltopdf
+    libfreetype6 \
+    fonts-terminus \
+    fonts-inconsolata \
+    fonts-dejavu-core \
+    fonts-noto \
+    fonts-noto-cjk \
+    fonts-font-awesome \
+    fonts-noto-extra \
+    wkhtmltopdf \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install pandoc based on architecture
 ARG TARGETARCH
@@ -79,11 +73,9 @@ COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/apps/api/prisma ./apps/api/prisma
+COPY --from=builder /app/apps/api/seed-data ./apps/api/seed-data
 COPY --from=builder /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=builder /app/packages/ ./packages/
-
-# Set environment variables
-ENV NODE_ENV=production
 
 # Set working directory to the dist directory
 WORKDIR /app/apps/api/dist

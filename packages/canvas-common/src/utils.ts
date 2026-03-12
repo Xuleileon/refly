@@ -70,7 +70,7 @@ export const prepareAddNode = (
   }
 
   // If connectTo is not provided, connect the new node to the start node
-  if (!connectTo?.length) {
+  if (!connectTo?.length && node.type !== 'memo') {
     const startNode = nodes.find((n) => n.type === 'start');
     const connectToStart: CanvasNodeFilter = {
       type: 'start',
@@ -154,6 +154,8 @@ export const prepareAddNode = (
     position: newPosition,
     selected: false,
     id: node?.id || `node-${genUniqueId()}`,
+    // Preserve style from input or use default for proper rendering
+    style: node.style ?? { width: 288, height: 'auto' },
   };
 
   // Create new edges based on connection types

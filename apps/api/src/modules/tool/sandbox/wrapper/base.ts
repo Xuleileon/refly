@@ -2,8 +2,8 @@ import { Sandbox } from '@scalebox/sdk';
 import { PinoLogger } from 'nestjs-pino';
 import { SandboxExecuteParams } from '@refly/openapi-schema';
 
-import { guard } from '../../../../utils/guard';
-import { Trace } from '../scalebox.tracer';
+import { guard } from '@refly/utils';
+import { Trace } from '@refly/observability';
 import {
   SandboxLifecycleException,
   LifecycleOperation,
@@ -152,7 +152,10 @@ export async function withLifecycleRetry<T extends ISandboxWrapper>(
       onRetry: (err) => {
         const error = err as SandboxLifecycleException;
         errors.push(error.message);
-        logger.warn({ error: error.message }, `Sandbox ${operation} attempt failed`);
+        logger.warn(
+          { error: error.message, sandboxId: error.sandboxId },
+          `Sandbox ${operation} attempt failed`,
+        );
         if (error.sandboxId) {
           onFailed?.(error.sandboxId, error);
         }

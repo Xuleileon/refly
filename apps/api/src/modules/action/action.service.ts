@@ -17,12 +17,14 @@ import {
   safeParseJSON,
 } from '@refly/utils';
 import pLimit from 'p-limit';
+import { ABORT_MESSAGES } from '../skill/skill.constants';
 import {
   ActionResult,
   ActionMessage as ActionMessageModel,
   ToolCallResult as ToolCallResultModel,
 } from '@prisma/client';
-import { ActionDetail, actionMessagePO2DTO } from '../action/action.dto';
+import { purgeContextForActionResult, purgeHistoryForActionResult } from '@refly/canvas-common';
+import { ActionDetail, actionMessagePO2DTO, sanitizeToolOutput } from '../action/action.dto';
 import { PrismaService } from '../common/prisma.service';
 import { providerItem2ModelInfo } from '../provider/provider.dto';
 import { ProviderService } from '../provider/provider.service';
@@ -35,6 +37,7 @@ import { InvokeSkillJobData } from '../skill/skill.dto';
 
 type GetActionResultParams = GetActionResultData['query'] & {
   includeFiles?: boolean;
+  sanitizeForDisplay?: boolean;
 };
 
 @Injectable()
@@ -60,7 +63,7 @@ export class ActionService {
   ) {}
 
   async getActionResult(user: User, param: GetActionResultParams): Promise<ActionDetail> {
-    const { resultId, version, includeFiles = false } = param;
+    const { resultId, version, includeFiles = false, sanitizeForDisplay = false } = param;
 
     const result = await this.prisma.actionResult.findFirst({
       where: {
@@ -74,14 +77,16 @@ export class ActionService {
       throw new ActionResultNotFoundError();
     }
 
-    const enrichedResult = await this.enrichActionResultWithDetails(user, result);
+    const enrichedResult = await this.enrichActionResultWithDetails(user, result, {
+      sanitizeForDisplay,
+    });
 
     if (includeFiles) {
       enrichedResult.files = await this.driveService.listAllDriveFiles(user, {
         canvasId: result.targetId,
         source: 'agent',
         resultId,
-        includeContent: true,
+        includeContent: false,
         ...(version ? { resultVersion: version } : { scope: 'present' }),
       });
     }
@@ -92,6 +97,7 @@ export class ActionService {
   private async enrichActionResultWithDetails(
     user: User,
     result: ActionResult,
+    options?: { sanitizeForDisplay?: boolean },
   ): Promise<ActionDetail> {
     const item =
       (result.providerItemId
@@ -131,6 +137,14 @@ export class ActionService {
       if (message.type === 'tool' && message.toolCallId) {
         const toolCallResult = toolCallResultMap.get(message.toolCallId);
         if (toolCallResult) {
+          const rawOutput = safeParseJSON(toolCallResult.output || '{}') ?? {
+            rawOutput: toolCallResult.output,
+          };
+          // Apply sanitization if needed
+          const output = options?.sanitizeForDisplay
+            ? sanitizeToolOutput(toolCallResult.toolName, rawOutput)
+            : rawOutput;
+
           // Attach the tool call result to the message
           enrichedMessage.toolCallResult = {
             callId: toolCallResult.callId,
@@ -139,9 +153,7 @@ export class ActionService {
             toolName: toolCallResult.toolName,
             stepName: toolCallResult.stepName,
             input: safeParseJSON(toolCallResult.input || '{}') ?? {},
-            output: safeParseJSON(toolCallResult.output || '{}') ?? {
-              rawOutput: toolCallResult.output,
-            },
+            output,
             error: toolCallResult.error || '',
             status: toolCallResult.status as 'executing' | 'completed' | 'failed',
             createdAt: toolCallResult.createdAt.getTime(),
@@ -158,7 +170,9 @@ export class ActionService {
       return { ...result, steps: [], messages: enrichedMessages, modelInfo };
     }
 
-    const stepsWithToolCalls = this.toolCallService.attachToolCallsToSteps(steps, toolCalls);
+    const stepsWithToolCalls = this.toolCallService.attachToolCallsToSteps(steps, toolCalls, {
+      sanitizeForDisplay: options?.sanitizeForDisplay,
+    });
     return { ...result, steps: stepsWithToolCalls, messages: enrichedMessages, modelInfo };
   }
 
@@ -310,8 +324,14 @@ export class ActionService {
               'errors',
               'errorType',
             ]),
-            context: batchReplaceRegex(context ?? '{}', combinedReplaceMap),
-            history: batchReplaceRegex(history ?? '[]', combinedReplaceMap),
+            context: JSON.stringify(
+              purgeContextForActionResult(
+                safeParseJSON(batchReplaceRegex(context ?? '{}', combinedReplaceMap)),
+              ),
+            ),
+            history: JSON.stringify(
+              purgeHistoryForActionResult(batchReplaceRegex(history ?? '[]', combinedReplaceMap)),
+            ),
             resultId: newResultId,
             uid: user.uid,
             targetId,
@@ -591,10 +611,9 @@ export class ActionService {
     // Get the abort controller for this action
     const entry = this.activeAbortControllers.get(resultId);
 
-    // Determine the error message based on the reason
-    const defaultReason = 'User aborted the action';
-    const abortReason = reason || 'User requested abort';
-    const errorMessage = reason || defaultReason;
+    // Use unified abort message constant
+    const abortReason = reason || ABORT_MESSAGES.USER_ABORT;
+    const errorMessage = reason || ABORT_MESSAGES.USER_ABORT;
 
     if (entry) {
       // Abort the action

@@ -21,7 +21,8 @@ import { HttpRouteInterceptor } from './utils/interceptors/http-route.intercepto
 import { GlobalExceptionFilter } from './utils/filters/global-exception.filter';
 import { CustomWsAdapter } from './utils/adapters/ws-adapter';
 import { setupStatsig } from '@refly/telemetry-node';
-import { migrateDbSchema } from './utils/prisma';
+import { migrateDbSchema, seedDatabase } from './utils/prisma';
+import { initTokenizer } from '@refly/utils/token';
 
 Sentry.init({
   dsn: process.env.SENTRY_DSN,
@@ -32,9 +33,17 @@ Sentry.init({
 });
 
 async function bootstrap() {
+  // Initialize tokenizer from CDN
+  await initTokenizer();
+
   // Auto migrate db schema if the environment variable is set
   if (process.env.AUTO_MIGRATE_DB_SCHEMA) {
     migrateDbSchema();
+  }
+
+  // Auto seed database if the environment variable is set
+  if (process.env.AUTO_SEED_DATA) {
+    await seedDatabase();
   }
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -88,5 +97,10 @@ async function bootstrap() {
   }
 
   await app.listen(configService.get('port'));
+
+  // Tell PM2 we are ready (when wait_ready: true). Keeps status "launching" until this runs.
+  if (typeof process.send === 'function') {
+    process.send('ready');
+  }
 }
 bootstrap();

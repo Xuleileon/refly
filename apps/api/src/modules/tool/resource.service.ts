@@ -14,7 +14,7 @@ import type {
 } from '@refly/openapi-schema';
 import type { ExtendedUpsertDriveFileRequest } from '../drive/drive.service';
 import { fileTypeFromBuffer } from 'file-type';
-import _ from 'lodash';
+import { get as _get, set as _set } from 'lodash';
 import mime from 'mime';
 import { DriveService } from '../drive/drive.service';
 import { MiscService } from '../misc/misc.service';
@@ -25,28 +25,20 @@ import {
   removeFieldsRecursively,
   type ResourceField,
 } from './utils/schema-utils';
-import { getCanvasId, getCurrentUser, getResultId, getResultVersion } from './tool-context';
-
-/**
- * Error thrown when fileId format is invalid
- */
-export class InvalidFileIdError extends Error {
-  constructor(
-    public readonly fieldName: string,
-    public readonly invalidValue: unknown,
-  ) {
-    const valueStr = typeof invalidValue === 'string' ? invalidValue : JSON.stringify(invalidValue);
-    super(
-      `Invalid fileId format for field "${fieldName}": "${valueStr}". Expected formats: "df-xxx", "fileId://df-xxx", or "@file:df-xxx". Please provide a valid file ID.`,
-    );
-    this.name = 'InvalidFileIdError';
-  }
-}
+import {
+  getCanvasId,
+  getCurrentUser,
+  getResultId,
+  getResultVersion,
+  getToolName,
+  getToolsetKey,
+} from './tool-context';
+import { MissingCanvasContextError } from './errors/resource-errors';
 
 /**
  * Error thrown when resource value is neither a valid fileId nor a public URL
  */
-export class InvalidResourceInputError extends Error {
+class InvalidResourceInputError extends Error {
   constructor(
     public readonly fieldName: string,
     public readonly invalidValue: unknown,
@@ -70,6 +62,7 @@ type ProcessingMode = 'input' | 'output';
 
 @Injectable()
 export class ResourceHandler {
+  [x: string]: any;
   private readonly logger = new Logger(ResourceHandler.name);
 
   constructor(
@@ -215,7 +208,7 @@ export class ResourceHandler {
             // Expand nested array paths within each array item
             const expandedPaths = this.expandArrayPaths(field.dataPath, field.arrayPaths, item);
             for (const path of expandedPaths) {
-              const value = _.get(item, path);
+              const value = _get(item, path);
               if (value !== undefined && value !== null) {
                 // Prefix with array index for correct path in root array
                 resourceTasks.push({
@@ -226,7 +219,7 @@ export class ResourceHandler {
               }
             }
           } else {
-            const value = _.get(item, field.dataPath);
+            const value = _get(item, field.dataPath);
             if (value !== undefined && value !== null) {
               // Prefix with array index for correct path in root array
               resourceTasks.push({
@@ -244,13 +237,13 @@ export class ResourceHandler {
         if (field.isArrayItem) {
           const expandedPaths = this.expandArrayPaths(field.dataPath, field.arrayPaths, data);
           for (const path of expandedPaths) {
-            const value = _.get(data, path);
+            const value = _get(data, path);
             if (value !== undefined && value !== null) {
               resourceTasks.push({ path, value, schema: field.schema });
             }
           }
         } else {
-          const value = _.get(data, field.dataPath);
+          const value = _get(data, field.dataPath);
           if (value !== undefined && value !== null) {
             resourceTasks.push({ path: field.dataPath, value, schema: field.schema });
           }
@@ -279,7 +272,7 @@ export class ResourceHandler {
       const task = resourceTasks[i];
       const result = taskResults.get(i);
       if (result) {
-        _.set(data, task.path, result);
+        _set(data, task.path, result);
       }
     }
 
@@ -464,7 +457,7 @@ export class ResourceHandler {
     // Process all fields in parallel (mutates data directly)
     await Promise.all(
       tasks.map(async ({ path, schema, isOptionalResource }) => {
-        const value = _.get(data, path);
+        const value = _get(data, path);
         if (value !== undefined) {
           const processed = await this.processResourceValue(
             value,
@@ -474,7 +467,7 @@ export class ResourceHandler {
             mode,
             isOptionalResource,
           );
-          _.set(data, path, processed);
+          _set(data, path, processed);
         }
       }),
     );
@@ -509,7 +502,7 @@ export class ResourceHandler {
 
       for (const { path, resolvedArrayPaths } of current) {
         const arrayPath = resolvedArrayPaths[depth];
-        const arrayData = _.get(data, arrayPath);
+        const arrayData = _get(data, arrayPath);
 
         if (Array.isArray(arrayData)) {
           for (let i = 0; i < arrayData.length; i++) {
@@ -559,7 +552,6 @@ export class ResourceHandler {
         }
         return value;
       }
-
       if (!isValidFileId(value)) {
         // If this is an optional resource (part of oneOf/anyOf), skip processing for non-fileId values
         if (isOptionalResource) {
@@ -580,11 +572,12 @@ export class ResourceHandler {
     canvasId: string,
     buffer: Buffer,
     fileNameTitle: string,
+    explicitMimeType?: string,
   ): Promise<DriveFile> {
-    // Infer MIME type and extension from buffer
+    // Use explicit mimeType if provided, otherwise infer from buffer
     const fileTypeResult = await fileTypeFromBuffer(buffer);
-    const mimetype = fileTypeResult?.mime;
-    const ext = fileTypeResult?.ext;
+    const mimetype = explicitMimeType || fileTypeResult?.mime;
+    const ext = explicitMimeType ? mime.getExtension(explicitMimeType) : fileTypeResult?.ext;
     const filename = `${fileNameTitle}.${ext}`;
 
     const uploadResult = await this.miscService.uploadFile(user, {
@@ -617,6 +610,7 @@ export class ResourceHandler {
     value: string,
     fileName: string,
     schemaProperty?: SchemaProperty,
+    explicitMimeType?: string,
   ): Promise<DriveFile | null> {
     // Handle data URL (data:image/png;base64,...)
     if (value.startsWith('data:')) {
@@ -625,7 +619,7 @@ export class ResourceHandler {
 
     // Handle external URL
     if (value.startsWith('http://') || value.startsWith('https://')) {
-      return await this.uploadUrlResource(user, canvasId, value, fileName);
+      return await this.uploadUrlResource(user, canvasId, value, fileName, explicitMimeType);
     }
 
     // Handle pure base64 string
@@ -697,6 +691,17 @@ export class ResourceHandler {
     title: string,
     fallbackMediaType: string,
   ): { filename: string; contentType: string } {
+    // Special handling for generate-avatar-video: force mp4 extension
+    if (getToolsetKey()?.startsWith('volcengine') && getToolName() === 'generate-avatar-video') {
+      const baseName = title
+        ? title.replace(/\.[a-zA-Z0-9]+(?:\?.*)?$/, '')
+        : `avatar_video_${Date.now()}`;
+      return {
+        filename: `${baseName}.mp4`,
+        contentType: 'video/mp4',
+      };
+    }
+
     if (!url) {
       const extension = mime.getExtension(fallbackMediaType) || fallbackMediaType;
       const baseName = title
@@ -762,12 +767,31 @@ export class ResourceHandler {
     canvasId: string,
     url: string,
     fileName: string,
+    explicitMimeType?: string,
   ): Promise<DriveFile> {
-    const { filename } = this.inferFileInfoFromUrl(url, fileName, 'application/octet-stream');
+    // Use explicit mimeType if provided, otherwise infer from URL
+    const { filename, contentType: inferredContentType } = this.inferFileInfoFromUrl(
+      url,
+      fileName,
+      'text/plain',
+    );
+    const contentType = explicitMimeType || inferredContentType;
+
+    // If explicit mimeType provided, adjust filename extension
+    let finalFilename = filename;
+    if (explicitMimeType) {
+      const ext = mime.getExtension(explicitMimeType);
+      if (ext) {
+        // Replace extension in filename
+        const baseName = filename.replace(/\.[^.]+$/, '');
+        finalFilename = `${baseName}.${ext}`;
+      }
+    }
 
     const driveFile = await this.driveService.createDriveFile(user, {
       canvasId,
-      name: filename,
+      name: finalFilename,
+      type: contentType,
       externalUrl: url,
       source: 'agent',
       resultId: getResultId(),
@@ -873,6 +897,11 @@ export class ResourceHandler {
       const user = getCurrentUser();
       const canvasId = getCanvasId();
 
+      // Validate required context
+      if (!canvasId) {
+        throw new MissingCanvasContextError();
+      }
+
       // Handle Buffer type
       if (Buffer.isBuffer(value)) {
         return await this.uploadBufferResource(user, canvasId, value, fileName);
@@ -915,12 +944,14 @@ export class ResourceHandler {
       isBase64?: boolean;
       resultId?: string;
       resultVersion?: number;
+      /** Explicit MIME type (takes priority over URL-inferred type) */
+      mimeType?: string;
     },
   ): Promise<DriveFile | null> {
     try {
       // Handle Buffer type
       if (Buffer.isBuffer(value)) {
-        return await this.uploadBufferResource(user, canvasId, value, fileName);
+        return await this.uploadBufferResource(user, canvasId, value, fileName, options?.mimeType);
       }
 
       // Handle string type (URL, base64, data URL)
@@ -929,7 +960,14 @@ export class ResourceHandler {
         const schemaProperty: SchemaProperty | undefined = options?.isBase64
           ? { type: 'string', format: 'base64' }
           : undefined;
-        return await this.uploadStringResource(user, canvasId, value, fileName, schemaProperty);
+        return await this.uploadStringResource(
+          user,
+          canvasId,
+          value,
+          fileName,
+          schemaProperty,
+          options?.mimeType,
+        );
       }
 
       // Handle object with buffer property
@@ -947,22 +985,22 @@ export class ResourceHandler {
    * Resolve fileId to specified format
    */
   private async resolveFileIdToFormat(value: unknown, format: string): Promise<string | Buffer> {
-    // Public URLs should pass through unchanged; do not force Drive lookup
-    if (this.isPublicUrl(value)) {
-      return value as string;
+    // For file_path format, check if value is already a local file path (from pre-handler)
+    if (format === 'file_path') {
+      if (typeof value === 'string' && (value.startsWith('/') || value.includes('composio-'))) {
+        // Already a local file path, return as-is
+        return value;
+      }
     }
 
     // Extract fileId from value
-    let fileId = typeof value === 'string' ? value : (value as any)?.fileId;
+    const fileId = extractFileId(value);
     if (!fileId) {
-      throw new Error('Invalid resource value: missing fileId');
-    }
-
-    // Strip prefix if present ('fileId://' or '@file:')
-    if (fileId.startsWith('fileId://')) {
-      fileId = fileId.slice('fileId://'.length);
-    } else if (fileId.startsWith('@file:')) {
-      fileId = fileId.slice('@file:'.length);
+      const valuePreview =
+        typeof value === 'string' ? value.slice(0, 50) : JSON.stringify(value)?.slice(0, 50);
+      throw new Error(
+        `Unable to extract fileId from resource value: ${valuePreview}. Expected formats: "df-xxx", "fileId://df-xxx", "@file:df-xxx", or { fileId: "df-xxx" }. Tip: Use @ in the input box to select and reference files.`,
+      );
     }
 
     // Get user context
@@ -972,7 +1010,9 @@ export class ResourceHandler {
     }
 
     // Get drive file details
-    const driveFile = await this.driveService.getDriveFileDetail(user, fileId);
+    const driveFile = await this.driveService.getDriveFileDetail(user, fileId, {
+      includeContent: false,
+    });
     if (!driveFile) {
       throw new Error(`Drive file not found: ${fileId}`);
     }
@@ -1002,6 +1042,18 @@ export class ResourceHandler {
         // binary (OpenAPI standard) or buffer (legacy, kept for backward compatibility)
         const result = await this.driveService.getDriveFileStream(user, fileId);
         return result.data;
+      }
+
+      case 'file_path': {
+        // file_path format: value should already be a local file path from pre-handler
+        // If it's already a path (not a fileId), return as-is
+        if (typeof value === 'string' && (value.startsWith('/') || value.includes('composio-'))) {
+          return value;
+        }
+        // Otherwise, this shouldn't happen - pre-handler should have converted it
+        throw new Error(
+          `file_path format expects a local file path, got: ${typeof value === 'string' ? value.slice(0, 50) : typeof value}. Pre-handler may not have processed this field.`,
+        );
       }
 
       default: {
@@ -1044,7 +1096,7 @@ export class ResourceHandler {
     const { canvasId, toolsetKey, toolName, content, resultId, resultVersion } = options;
 
     if (!canvasId) {
-      return null;
+      throw new MissingCanvasContextError();
     }
 
     try {
