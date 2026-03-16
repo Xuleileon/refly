@@ -38,13 +38,6 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "image=${OWNER}/refly-${{ matrix.app }}" >> $GITHUB_OUTPUT
 
-      - name: Patch API Dockerfile (fix upstream build issues)
-        if: matrix.app == 'api'
-        run: |
-          sed -i 's/font-noto-extra/fonts-noto-cjk-extra/' ./apps/api/Dockerfile.slim
-          sed -i 's/pnpm --filter api deploy --prod/pnpm --filter api deploy --prod --legacy/' ./apps/api/Dockerfile.slim
-          sed -i '/pnpm --filter api deploy --prod --legacy \/app\/prod-bundle/a RUN cp -r /app/node_modules/.pnpm/@prisma+client@*/node_modules/.prisma /app/prod-bundle/node_modules/.prisma 2>/dev/null || cp -r /app/node_modules/.prisma /app/prod-bundle/node_modules/.prisma 2>/dev/null || true' ./apps/api/Dockerfile.slim
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

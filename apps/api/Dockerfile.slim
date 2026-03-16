@@ -33,7 +33,16 @@ COPY deploy/docker/prepare-deploy.js ./
 RUN node prepare-deploy.js
 
 # Use pnpm deploy to create a pruned production bundle
-RUN pnpm --filter api deploy --prod /app/prod-bundle
+RUN pnpm --filter api deploy --prod --legacy /app/prod-bundle
+
+# pnpm deploy omits Prisma generated client; copy it into the prod bundle
+RUN set -e; \
+    SRC=$(ls -d /app/node_modules/.pnpm/@prisma+client@*/node_modules/.prisma 2>/dev/null | head -1); \
+    if [ -n "$SRC" ]; then \
+      DST=$(ls -d /app/prod-bundle/node_modules/.pnpm/@prisma+client@*/node_modules 2>/dev/null | head -1); \
+      [ -n "$DST" ] && cp -r "$SRC" "$DST/.prisma"; \
+      cp -r "$SRC" /app/prod-bundle/node_modules/.prisma; \
+    fi
 
 # Production stage
 FROM node:24.13.1-slim AS production
@@ -58,7 +67,7 @@ RUN apt-get update \
     fonts-noto \
     fonts-noto-cjk \
     fonts-font-awesome \
-    font-noto-extra \
+    fonts-noto-cjk-extra \
     wkhtmltopdf \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
